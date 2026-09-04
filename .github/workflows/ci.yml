@@ -1,0 +1,103 @@
+# CodeDock CI（设计说明见下）
+#
+# 目标（对应设计文档 §20/§21/§23）：
+# - 门禁左移：fmt + clippy(-D warnings) + 全量测试，保证 Cargo Workspace 随时可用；
+# - 跨平台先行（§18.8）：Ubuntu + macOS 双平台跑测试；
+#   Windows 在阶段 1 补齐 Named Pipe IPC（ipc.rs TODO）后加入 matrix；
+# - 主干可交付：main 分支 push 产出 release 二进制（daemon + cli）作为冒烟产物。
+#
+# 设计取舍：
+# - lint 单独一个 job，先失败早反馈；test 按 OS matrix 并行；
+# - Swatinem/rust-cache 按 job/matrix 分 key，避免缓存互踩；
+# - build 依赖 lint+test 全绿后才执行，且仅在 main push 触发（PR 不浪费算力）；
+# - 全局 RUSTFLAGS=-D warnings：依赖与本地代码警告一律视为失败。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # TODO(阶段1): 增加 windows-latest，需先实现 Named Pipe IPC（§2/§18.8）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+
+      - name: cargo test (doc)
+        run: cargo test --workspace --doc
+
+  build:
+    name: build artifacts (linux)
+    needs: [lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release -p codedock-agent-daemon -p codedock-cli
+
+      - name: smoke（二进制可执行）
+        run: |
+          ./target/release/codedock --version
+          ./target/release/codedock-daemon --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codedock-linux-${{ github.sha }}
+          path: |
+            target/release/codedock-daemon
+            target/release/codedock
+          if-no-files-found: error
+          retention-days: 14

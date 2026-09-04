@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Rust 依赖：每周一批合并，减少 PR 噪音
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        patterns:
+          - "*"
+
+  # CI 用的 GitHub Actions 同步更新
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

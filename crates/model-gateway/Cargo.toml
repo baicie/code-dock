@@ -1,0 +1,21 @@
+[package]
+name = "codedock-model-gateway"
+description = "Provider 适配、路由、重试、流式输出、成本统计（§6 / §11）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+codedock-secret-store = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

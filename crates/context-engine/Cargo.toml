@@ -1,0 +1,17 @@
+[package]
+name = "codedock-context-engine"
+description = "候选上下文、排序、预算、变换、快照（§6 / §8.4 / §12）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

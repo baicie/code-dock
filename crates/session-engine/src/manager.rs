@@ -1,0 +1,366 @@
+//! 事件溯源的 SessionManager 实现。
+//!
+//! 每次状态迁移都作为 Durable Event 追加（§8.2.3），命令幂等由
+//! `method + idempotency_key` 去重保证（§8.2.6）：重复命令直接返回缓存会话的
+//! 当前投影，不再产生任何副作用。
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use codedock_event_store::EventStore;
+use codedock_protocol::{Actor, Durability, EventEnvelope, SessionId, SessionMode, SessionStatus};
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::{SessionError, SessionManager, SessionRecord};
+
+/// 客户端可见的 Session 投影。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionInfo {
+    pub session_id: SessionId,
+    pub mode: SessionMode,
+    pub status: SessionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub latest_sequence: u64,
+}
+
+/// 基于 Event Store 的 SessionManager。
+pub struct EventSourcedSessionManager {
+    store: Arc<dyn EventStore>,
+    /// 状态 Projection（内存；TODO 阶段1：重启后从 Event Store 重建，§17.1）。
+    sessions: Mutex<HashMap<SessionId, SessionRecord>>,
+    /// 幂等缓存：`method:key` → 受影响 session。
+    done: Mutex<HashMap<String, SessionId>>,
+}
+
+impl EventSourcedSessionManager {
+    pub fn new(store: Arc<dyn EventStore>) -> Self {
+        Self {
+            store,
+            sessions: Mutex::new(HashMap::new()),
+            done: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn info(&self, rec: &SessionRecord) -> Result<SessionInfo, SessionError> {
+        let latest_sequence = self
+            .store
+            .latest_sequence(rec.session_id)
+            .await
+            .map_err(|e| SessionError::EventStore(e.to_string()))?;
+        Ok(SessionInfo {
+            session_id: rec.session_id,
+            mode: rec.mode,
+            status: rec.status,
+            task: rec.task.clone(),
+            latest_sequence,
+        })
+    }
+
+    fn record_of(&self, id: SessionId) -> Result<SessionRecord, SessionError> {
+        self.sessions
+            .lock()
+            .expect("session map poisoned")
+            .get(&id)
+            .cloned()
+            .ok_or(SessionError::NotFound(id))
+    }
+
+    fn remember(&self, rec: SessionRecord) {
+        self.sessions
+            .lock()
+            .expect("session map poisoned")
+            .insert(rec.session_id, rec);
+    }
+
+    /// 幂等命中：返回受影响 session 的当前投影。
+    async fn replay_done(&self, dk: &Option<String>) -> Result<Option<SessionInfo>, SessionError> {
+        if let Some(k) = dk {
+            let cached = self.done.lock().expect("done map poisoned").get(k).copied();
+            if let Some(sid) = cached {
+                let rec = self.record_of(sid)?;
+                return Ok(Some(self.info(&rec).await?));
+            }
+        }
+        Ok(None)
+    }
+
+    fn remember_done(&self, dk: &Option<String>, sid: SessionId) {
+        if let Some(k) = dk {
+            self.done
+                .lock()
+                .expect("done map poisoned")
+                .insert(k.clone(), sid);
+        }
+    }
+
+    /// 追加一条 Durable Event（§8.2.3）。sequence 由 Event Store 单调分配。
+    async fn append(
+        &self,
+        session_id: SessionId,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<u64, SessionError> {
+        let envelope = EventEnvelope::draft(
+            session_id,
+            None,
+            event_type,
+            Durability::Durable,
+            Actor::user("local"),
+            payload,
+        );
+        self.store
+            .append(envelope)
+            .await
+            .map_err(|e| SessionError::EventStore(e.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionManager for EventSourcedSessionManager {
+    async fn create(
+        &self,
+        mode: SessionMode,
+        task: Option<String>,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("create:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+
+        let mut rec = SessionRecord::new(mode);
+        rec.task = task.clone();
+        rec.transition(SessionStatus::Running)?; // created → running（§8.2.7）
+
+        self.append(
+            rec.session_id,
+            "session.created",
+            json!({
+                "mode": mode, "task": task, "status": "created"
+            }),
+        )
+        .await?;
+        self.append(rec.session_id, "session.started", json!({ "mode": mode }))
+            .await?;
+
+        self.remember(rec.clone());
+        self.remember_done(&dk, rec.session_id);
+        self.info(&rec).await
+    }
+
+    async fn status(&self, id: SessionId) -> Result<SessionInfo, SessionError> {
+        let rec = self.record_of(id)?;
+        self.info(&rec).await
+    }
+
+    async fn pause(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("pause:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+        let mut rec = self.record_of(id)?;
+        let from = rec.status;
+        rec.transition(SessionStatus::Paused)?;
+        self.append(
+            id,
+            "session.paused",
+            json!({ "from": from, "to": rec.status }),
+        )
+        .await?;
+        self.remember(rec.clone());
+        self.remember_done(&dk, id);
+        self.info(&rec).await
+    }
+
+    async fn resume(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("resume:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+        let mut rec = self.record_of(id)?;
+        let from = rec.status;
+        rec.transition(SessionStatus::Running)?;
+        self.append(
+            id,
+            "session.resumed",
+            json!({ "from": from, "to": rec.status }),
+        )
+        .await?;
+        self.remember(rec.clone());
+        self.remember_done(&dk, id);
+        self.info(&rec).await
+    }
+
+    async fn cancel(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("cancel:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+        let mut rec = self.record_of(id)?;
+        let from = rec.status;
+        rec.transition(SessionStatus::Cancelled)?;
+        self.append(
+            id,
+            "session.cancelled",
+            json!({ "from": from, "to": rec.status }),
+        )
+        .await?;
+        self.remember(rec.clone());
+        self.remember_done(&dk, id);
+        self.info(&rec).await
+    }
+
+    async fn set_mode(
+        &self,
+        id: SessionId,
+        mode: SessionMode,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("mode:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+        let mut rec = self.record_of(id)?;
+        let from = rec.mode;
+        rec.mode = mode;
+        self.append(
+            id,
+            "session.mode_changed",
+            json!({ "from": from, "to": mode }),
+        )
+        .await?;
+        self.remember(rec.clone());
+        self.remember_done(&dk, id);
+        self.info(&rec).await
+    }
+
+    async fn events(
+        &self,
+        id: SessionId,
+        after_sequence: u64,
+        durable_only: bool,
+        limit: usize,
+    ) -> Result<Vec<EventEnvelope>, SessionError> {
+        self.store
+            .load(id, after_sequence, limit, durable_only)
+            .await
+            .map_err(|e| SessionError::EventStore(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codedock_event_store::InMemoryEventStore;
+
+    fn manager() -> (EventSourcedSessionManager, Arc<InMemoryEventStore>) {
+        let store = Arc::new(InMemoryEventStore::new());
+        let mgr = EventSourcedSessionManager::new(store.clone());
+        (mgr, store)
+    }
+
+    #[tokio::test]
+    async fn full_lifecycle_appends_durable_events() {
+        let (mgr, _store) = manager();
+        let info = mgr
+            .create(SessionMode::Plan, Some("修复一个真实 Bug".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(info.status, SessionStatus::Running);
+        assert_eq!(info.latest_sequence, 2, "created + started");
+
+        let info = mgr.pause(info.session_id, None).await.unwrap();
+        assert_eq!(info.status, SessionStatus::Paused);
+        let info = mgr.resume(info.session_id, None).await.unwrap();
+        assert_eq!(info.status, SessionStatus::Running);
+        let info = mgr.cancel(info.session_id, None).await.unwrap();
+        assert_eq!(info.status, SessionStatus::Cancelled);
+        assert_eq!(info.latest_sequence, 5);
+
+        let events = mgr.events(info.session_id, 0, true, 100).await.unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                "session.created",
+                "session.started",
+                "session.paused",
+                "session.resumed",
+                "session.cancelled"
+            ]
+        );
+        assert!(events.iter().all(|e| e.durability == Durability::Durable));
+        // sequence 严格单调递增
+        assert!(events.windows(2).all(|w| w[0].sequence < w[1].sequence));
+    }
+
+    #[tokio::test]
+    async fn idempotency_prevents_double_execution() {
+        let (mgr, _store) = manager();
+        let a = mgr
+            .create(SessionMode::Ask, Some("task".into()), Some("k1".into()))
+            .await
+            .unwrap();
+        let b = mgr
+            .create(SessionMode::Ask, Some("task".into()), Some("k1".into()))
+            .await
+            .unwrap();
+        assert_eq!(a.session_id, b.session_id, "相同幂等键返回同一会话");
+        assert_eq!(b.latest_sequence, 2, "不重复追加事件");
+
+        mgr.cancel(a.session_id, Some("c1".to_string()))
+            .await
+            .unwrap();
+        let after = mgr
+            .cancel(a.session_id, Some("c1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(after.status, SessionStatus::Cancelled);
+        assert_eq!(after.latest_sequence, 3, "重复 cancel 不重复追加");
+    }
+
+    #[tokio::test]
+    async fn invalid_transition_is_rejected_without_side_effect() {
+        let (mgr, store) = manager();
+        let info = mgr.create(SessionMode::Ask, None, None).await.unwrap();
+        mgr.pause(info.session_id, None).await.unwrap();
+        let err = mgr.pause(info.session_id, None).await.unwrap_err();
+        assert!(matches!(err, SessionError::InvalidTransition { .. }));
+        assert_eq!(
+            mgr.events(info.session_id, 0, true, 100)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        drop(store);
+    }
+
+    #[tokio::test]
+    async fn mode_change_and_unknown_session() {
+        let (mgr, _store) = manager();
+        let info = mgr.create(SessionMode::Ask, None, None).await.unwrap();
+        let info = mgr
+            .set_mode(info.session_id, SessionMode::Edit, None)
+            .await
+            .unwrap();
+        assert_eq!(info.mode, SessionMode::Edit);
+
+        let err = mgr.status(SessionId::generate()).await.unwrap_err();
+        assert!(matches!(err, SessionError::NotFound(_)));
+    }
+}

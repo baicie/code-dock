@@ -1,0 +1,15 @@
+[package]
+name = "codedock-remote-gateway"
+description = "设备配对、端到端加密、角色、撤销（§6 / §9.2 / §16）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "codedock-trace-store"
+description = "Span、耗时、Token、错误、重试和成本（§6）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }

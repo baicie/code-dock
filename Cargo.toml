@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-daemon",
+    "crates/artifact-store",
+    "crates/checkpoint-manager",
+    "crates/context-engine",
+    "crates/event-store",
+    "crates/model-gateway",
+    "crates/policy-engine",
+    "crates/plugin-host",
+    "crates/project-index",
+    "crates/protocol",
+    "crates/remote-gateway",
+    "crates/secret-store",
+    "crates/session-engine",
+    "crates/trace-store",
+    "crates/tool-runtime",
+    "apps/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["CodeDock Contributors"]
+
+[workspace.dependencies]
+# 内部 crate
+codedock-protocol = { path = "crates/protocol" }
+codedock-event-store = { path = "crates/event-store" }
+codedock-session-engine = { path = "crates/session-engine" }
+codedock-context-engine = { path = "crates/context-engine" }
+codedock-model-gateway = { path = "crates/model-gateway" }
+codedock-tool-runtime = { path = "crates/tool-runtime" }
+codedock-policy-engine = { path = "crates/policy-engine" }
+codedock-plugin-host = { path = "crates/plugin-host" }
+codedock-project-index = { path = "crates/project-index" }
+codedock-artifact-store = { path = "crates/artifact-store" }
+codedock-checkpoint-manager = { path = "crates/checkpoint-manager" }
+codedock-remote-gateway = { path = "crates/remote-gateway" }
+codedock-secret-store = { path = "crates/secret-store" }
+codedock-trace-store = { path = "crates/trace-store" }
+
+# 通用
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

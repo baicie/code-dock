@@ -1,0 +1,20 @@
+[package]
+name = "codedock-artifact-store"
+description = "基于 SHA-256 的内容寻址 Blob Store 与产物管理（§6 / §17.2）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

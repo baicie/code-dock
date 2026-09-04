@@ -1,0 +1,16 @@
+[package]
+name = "codedock-secret-store"
+description = "模型密钥、插件密钥、远程设备密钥（§6 / §11.4 / §17.3）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

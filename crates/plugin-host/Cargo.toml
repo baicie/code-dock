@@ -1,0 +1,18 @@
+[package]
+name = "codedock-plugin-host"
+description = "WASM 宿主、Sidecar 生命周期、插件权限（§6 / §10）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

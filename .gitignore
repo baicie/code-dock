@@ -1,0 +1,33 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / 前端
+node_modules/
+dist/
+.pnpm-store/
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# 本地数据
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+/data
+/blobs
+
+# 环境与密钥（永远不入库）
+.env
+.env.*
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+!.vscode/extensions.json
+.DS_Store

@@ -1,0 +1,16 @@
+[package]
+name = "codedock-project-index"
+description = "文件、文本、符号、依赖和 Git 增量索引（§6 / §12.2）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codedock-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }

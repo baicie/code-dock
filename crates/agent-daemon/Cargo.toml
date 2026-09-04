@@ -1,0 +1,27 @@
+[package]
+name = "codedock-agent-daemon"
+description = "CodeDock Agent Daemon：进程生命周期、RPC、客户端连接、模块装配（§6）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "codedock-daemon"
+path = "src/main.rs"
+
+[dependencies]
+codedock-protocol = { workspace = true }
+codedock-event-store = { workspace = true }
+codedock-session-engine = { workspace = true }
+codedock-policy-engine = { workspace = true }
+codedock-secret-store = { workspace = true }
+codedock-artifact-store = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

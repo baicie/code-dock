@@ -1,0 +1,106 @@
+// CodeDock Plugin API — WIT 世界骨架（§10，阶段 5 落地）。
+//
+// 插件默认运行时：Wasmtime + WASI Component Model + WIT（§2）。
+// 插件能力：tool_provider / context_provider / model_provider / workflow_provider /
+// ui_panel / policy_extension（§10.2）。Policy Extension 只能增加限制，
+// 不能绕过 Runtime 的最低安全策略。
+
+package codedock:plugin@1.0.0;
+
+/// 权限能力集合（与 protocol::Capability 对应，§8.3.6）。
+interface capabilities {
+    enum capability {
+        fs-read,
+        fs-write,
+        fs-delete,
+        process-execute,
+        process-kill,
+        network-connect,
+        git-read,
+        git-write,
+        git-push,
+        secrets-read,
+        browser-read,
+        browser-control,
+        system-read,
+        system-write,
+        external-read,
+        external-write,
+    }
+
+    record permission {
+        capability: capability,
+        /// 具体资源范围，如 "$workspace/**"，不允许空泛声明。
+        resource: string,
+    }
+}
+
+/// 宿主提供给插件的最小能力面（默认拒绝，最小权限 §2）。
+interface host {
+    use capabilities.{permission};
+
+    /// 记录日志；宿主负责脱敏（§18.5）。
+    log: func(level: log-level, message: string);
+
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// 读取已授权资源；越权返回 denied。
+    read-authorized: func(resource: permission) -> result<string, string>;
+}
+
+/// Tool Provider（§10.2）：插件向 Runtime 注册工具。
+interface tool-provider {
+    /// 工具声明（对应 protocol::ToolDefinition）。
+    record tool-definition {
+        name: string,          // namespace.action，如 "android.logcat"
+        version: string,
+        description: string,
+        input-schema: string,  // JSON Schema
+        output-schema: string,
+    }
+
+    record tool-invocation {
+        call-id: string,
+        arguments-json: string,
+    }
+
+    record tool-outcome {
+        status: result-status,
+        output-json: string,
+    }
+
+    enum result-status {
+        success,
+        failure,
+        cancelled,
+        timeout,
+    }
+
+    list-tools: func() -> list<tool-definition>;
+    invoke: func(invocation: tool-invocation) -> tool-outcome;
+}
+
+/// Context Provider（§10.2）。
+interface context-provider {
+    record context-candidate {
+        title: string,
+        uri: string,
+        content: string,
+        score: f32,
+    }
+
+    /// 按任务返回候选；trust 一律由宿主标记为 plugin_untrusted（§8.4.5）。
+    provide: func(task: string) -> list<context-candidate>;
+}
+
+/// 插件入口世界。
+world plugin {
+    import host;
+    export tool-provider;
+    export context-provider;
+}

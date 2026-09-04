@@ -1,0 +1,15 @@
+[package]
+name = "codedock-protocol"
+description = "CodeDock 协议层：Session Event / Tool Capability / Context Snapshot 协议的共享类型"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

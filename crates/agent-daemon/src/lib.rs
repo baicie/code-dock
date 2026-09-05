@@ -98,11 +98,22 @@ pub async fn load_env_secrets(model: &ModelLayerConfig, secrets: &Arc<dyn Secret
 pub async fn assemble_in_memory() -> Arc<Runtime> {
     let event_store: Arc<dyn codedock_event_store::EventStore> =
         Arc::new(InMemoryEventStore::new());
+    let checkpoints: Arc<dyn codedock_checkpoint_manager::CheckpointStore> = Arc::new(
+        codedock_checkpoint_manager::DiskCheckpointStore::new(std::env::temp_dir().join(format!(
+            "codedock-ckpt-mem-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ))),
+    );
     Arc::new(
         assemble_runtime(
             event_store,
             &ModelLayerConfig::default(),
             &std::env::temp_dir(),
+            checkpoints,
         )
         .await,
     )
@@ -120,25 +131,61 @@ pub async fn assemble_sqlite(
             .await
             .context("打开 SQLite Event Store 失败")?,
     );
-    Ok(assemble_runtime(event_store, model, workspace).await)
+    let checkpoints: Arc<dyn codedock_checkpoint_manager::CheckpointStore> = Arc::new(
+        codedock_checkpoint_manager::DiskCheckpointStore::new(data_dir.join("checkpoints")),
+    );
+    Ok(assemble_runtime(event_store, model, workspace, checkpoints).await)
 }
 
-/// 内置工具装配（阶段 2 逐个补充：file.patch / search.text / shell.execute / git.*）。
+/// 内置工具装配：阶段 2 六类核心工具（§23）。
 fn build_tools(workspace: &Path) -> codedock_tool_runtime::ToolRegistry {
-    let mut tools = codedock_tool_runtime::ToolRegistry::new();
-    tools
-        .register(Box::new(codedock_tool_runtime::FileReadTool::new(
+    use codedock_tool_runtime::{GitTool, ToolRegistry, ToolRuntimeError};
+
+    fn expect(name: &str, result: Result<(), ToolRuntimeError>) {
+        result.unwrap_or_else(|e| panic!("注册 {name} 失败: {e}"));
+    }
+    let mut tools = ToolRegistry::new();
+    expect(
+        "file.read",
+        tools.register(Box::new(codedock_tool_runtime::FileReadTool::new(
             workspace,
-        )))
-        .expect("注册 file.read 失败");
+        ))),
+    );
+    expect(
+        "file.patch",
+        tools.register(Box::new(codedock_tool_runtime::FilePatchTool::new(
+            workspace,
+        ))),
+    );
+    expect(
+        "search.text",
+        tools.register(Box::new(codedock_tool_runtime::SearchTextTool::new(
+            workspace,
+        ))),
+    );
+    expect(
+        "shell.execute",
+        tools.register(Box::new(codedock_tool_runtime::ShellExecuteTool::new(
+            workspace,
+        ))),
+    );
+    expect(
+        "git.status",
+        tools.register(Box::new(GitTool::status(workspace))),
+    );
+    expect(
+        "git.diff",
+        tools.register(Box::new(GitTool::diff(workspace))),
+    );
     tools
 }
 
-/// 公共装配路径：Event Store → 会话管理 → 密钥/Provider/工具 → Policy → Turn 引擎。
+/// 公共装配路径：Event Store → 会话管理 → 密钥/Provider/工具/Checkpoint → Policy → Turn 引擎。
 async fn assemble_runtime(
     event_store: Arc<dyn codedock_event_store::EventStore>,
     model: &ModelLayerConfig,
     workspace: &Path,
+    checkpoints: Arc<dyn codedock_checkpoint_manager::CheckpointStore>,
 ) -> Runtime {
     let sessions: Arc<dyn SessionManager> = Arc::new(
         EventSourcedSessionManager::restore(event_store.clone())
@@ -160,6 +207,8 @@ async fn assemble_runtime(
             Arc::new(registry),
             tools,
             policy,
+            checkpoints,
+            workspace.to_path_buf(),
             model.limits,
         )
         .await

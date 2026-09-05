@@ -239,6 +239,7 @@ dependencies = [
  "anyhow",
  "clap",
  "codedock-artifact-store",
+ "codedock-checkpoint-manager",
  "codedock-event-store",
  "codedock-model-gateway",
  "codedock-policy-engine",
@@ -281,6 +282,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -411,6 +414,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "codedock-checkpoint-manager",
  "codedock-event-store",
  "codedock-model-gateway",
  "codedock-policy-engine",
@@ -433,6 +437,7 @@ dependencies = [
  "codedock-protocol",
  "futures",
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

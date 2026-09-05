@@ -17,6 +17,7 @@ codedock-event-store = { workspace = true }
 codedock-session-engine = { workspace = true }
 codedock-model-gateway = { workspace = true }
 codedock-tool-runtime = { workspace = true }
+codedock-checkpoint-manager = { workspace = true }
 codedock-policy-engine = { workspace = true }
 codedock-secret-store = { workspace = true }
 codedock-artifact-store = { workspace = true }

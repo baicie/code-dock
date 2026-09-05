@@ -9,7 +9,7 @@
 pub mod builtin;
 pub mod validation;
 
-pub use builtin::FileReadTool;
+pub use builtin::{FilePatchTool, FileReadTool, GitTool, SearchTextTool, ShellExecuteTool};
 
 use async_trait::async_trait;
 use codedock_protocol::{ToolDefinition, ToolExecutionPlan, ToolResult};
@@ -24,6 +24,8 @@ pub enum ToolRuntimeError {
     UnknownTool(String),
     #[error("参数校验失败: {0}")]
     InvalidArguments(String),
+    #[error("资源已变化（§18.2 change.conflicted）: {0}")]
+    ResourceConflict(String),
     #[error("执行失败: {0}")]
     ExecutionFailed(String),
     #[error("任务已取消")]

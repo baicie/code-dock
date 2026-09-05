@@ -81,6 +81,8 @@ struct Command {
     text: Option<String>,
     #[serde(default, rename = "tool_call_id")]
     tool_call_id: Option<String>,
+    #[serde(default, rename = "checkpoint_id")]
+    checkpoint_id: Option<String>,
     /// 审批响应：`approve_once` | `deny`（§9.1 allowed_responses）。
     #[serde(default, rename = "response")]
     response: Option<String>,
@@ -180,6 +182,19 @@ async fn run(runtime: &Runtime, method: &str, params: Value) -> Result<Value, Rp
             let text = cmd.require_text()?;
             let outcome = runtime.turns.send_message(id, text, cmd.key()).await?;
             Ok(serde_json::to_value(outcome)?)
+        }
+
+        "checkpoint.restore" => {
+            let id = cmd.require_session()?;
+            let checkpoint_id = cmd
+                .checkpoint_id
+                .clone()
+                .ok_or_else(|| invalid("缺少 checkpoint_id"))?;
+            let result = runtime
+                .turns
+                .restore_checkpoint(id, &checkpoint_id, cmd.key())
+                .await?;
+            Ok(result)
         }
 
         "tool.approve" => {
@@ -344,6 +359,28 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, codes::CODEDOCK_ERROR);
         assert!(err.message.contains("Paused"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_restore_reports_missing_checkpoint() {
+        let runtime = assemble_in_memory().await;
+        let (sid, _) = create_session(&runtime, "ask").await;
+        let resp = dispatch(
+            &runtime,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: JsonRpcId::String("t-ckpt".into()),
+                method: "checkpoint.restore".into(),
+                params: Some(json!({
+                    "session_id": sid,
+                    "checkpoint_id": "cp_missing",
+                })),
+            },
+        )
+        .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, codes::CODEDOCK_ERROR);
+        assert!(err.message.contains("checkpoint"), "{err:?}");
     }
 
     #[tokio::test]

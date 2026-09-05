@@ -26,16 +26,18 @@
 //! 审批锚定 operation_digest（§9.1），一次性、带过期时间，崩溃后可从事件流恢复。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use codedock_checkpoint_manager::CheckpointStore;
 use codedock_event_store::EventStore;
 use codedock_model_gateway::{ChatDelta, ModelProvider, ProviderRegistry, SessionBudgetLimits};
 use codedock_policy_engine::{PolicyContext, PolicyDecision, PolicyEngine};
 use codedock_protocol::{
-    Actor, Classification, ContextBudget, ContextItem, ContextItemContent, ContextSnapshot,
-    Durability, Effect, EventEnvelope, ModelRef, Role, Selection, SelectionReason, SessionId,
-    SessionMode, SessionStatus, SourceKind, SourceRef, ToolCallId, ToolDefinition,
+    Actor, Capability, Classification, ContextBudget, ContextItem, ContextItemContent,
+    ContextSnapshot, Durability, Effect, EventEnvelope, ModelRef, Role, Selection, SelectionReason,
+    SessionId, SessionMode, SessionStatus, SourceKind, SourceRef, ToolCallId, ToolDefinition,
     ToolExecutionPlan, ToolResultContent, Trust, TurnId,
 };
 use codedock_tool_runtime::{ToolOutputChunk, ToolRegistry, ToolRuntimeError};
@@ -75,6 +77,8 @@ pub enum TurnError {
     Model(String),
     #[error("工具执行失败: {0}")]
     Tool(String),
+    #[error("checkpoint 操作失败: {0}")]
+    Checkpoint(String),
     #[error("事件存储失败: {0}")]
     EventStore(String),
 }
@@ -137,6 +141,10 @@ pub struct TurnEngine {
     providers: Arc<ProviderRegistry>,
     tools: Arc<ToolRegistry>,
     policy: Arc<dyn PolicyEngine>,
+    /// 写操作前的文件快照（§3.5 / §20.1）。
+    checkpoints: Arc<dyn CheckpointStore>,
+    /// 工作区根（Checkpoint 快照的读取边界）。
+    workspace: PathBuf,
     limits: SessionBudgetLimits,
     approval_ttl: ChronoDuration,
     /// 幂等缓存：command key → 已完成 Turn 的结果（§8.2.6）。
@@ -155,6 +163,8 @@ impl TurnEngine {
         providers: Arc<ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         policy: Arc<dyn PolicyEngine>,
+        checkpoints: Arc<dyn CheckpointStore>,
+        workspace: PathBuf,
         limits: SessionBudgetLimits,
     ) -> Self {
         Self {
@@ -163,6 +173,8 @@ impl TurnEngine {
             providers,
             tools,
             policy,
+            checkpoints,
+            workspace,
             limits,
             approval_ttl: APPROVAL_TTL,
             done: Mutex::new(HashMap::new()),
@@ -186,9 +198,20 @@ impl TurnEngine {
         providers: Arc<ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         policy: Arc<dyn PolicyEngine>,
+        checkpoints: Arc<dyn CheckpointStore>,
+        workspace: PathBuf,
         limits: SessionBudgetLimits,
     ) -> Result<Self, TurnError> {
-        let engine = Self::new(store, sessions, providers, tools, policy, limits);
+        let engine = Self::new(
+            store,
+            sessions,
+            providers,
+            tools,
+            policy,
+            checkpoints,
+            workspace,
+            limits,
+        );
         let all = engine
             .store
             .load_all_sessions()
@@ -729,6 +752,21 @@ impl TurnEngine {
 
         let plan = match executor.preflight(arguments).await {
             Ok(plan) => plan,
+            Err(ToolRuntimeError::ResourceConflict(reason)) => {
+                // §18.2：源文件在补丁生成后被外部修改 → change.conflicted，
+                // 在 Preflight 阶段即拒绝，不进入审批。
+                self.append(
+                    session_id,
+                    turn_id,
+                    "change.conflicted",
+                    Durability::Durable,
+                    json!({ "tool_call_id": tool_call_id, "resource": reason }),
+                )
+                .await?;
+                return self
+                    .reject_tool(session_id, turn_id, tool_call_id, &reason)
+                    .await;
+            }
             Err(err) => {
                 return self
                     .reject_tool(session_id, turn_id, tool_call_id, &err.to_string())
@@ -848,6 +886,47 @@ impl TurnEngine {
         plan: ToolExecutionPlan,
         tool_call_id: &str,
     ) -> Result<(), TurnError> {
+        // §3.5 / §20.1：任何声明 fs.write 的工具执行前，对目标文件创建 Checkpoint。
+        let write_targets: Vec<String> = plan
+            .permissions
+            .iter()
+            .filter(|p| p.capability == Capability::FsWrite)
+            .map(|p| p.resource.clone())
+            .collect();
+        if !write_targets.is_empty() {
+            match self
+                .checkpoints
+                .create(
+                    session_id,
+                    &format!("{tool} 前"),
+                    &self.workspace,
+                    &write_targets,
+                )
+                .await
+            {
+                Ok(cp) => {
+                    self.append(
+                        session_id,
+                        turn_id,
+                        "checkpoint.created",
+                        Durability::Durable,
+                        json!({ "checkpoint_id": cp.id, "tool": tool, "files": cp.files }),
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    return self
+                        .fail_tool(
+                            session_id,
+                            turn_id,
+                            tool_call_id,
+                            &format!("Checkpoint 创建失败，拒绝执行写操作（§3.5）: {err}"),
+                        )
+                        .await;
+                }
+            }
+        }
+
         self.append(
             session_id,
             turn_id,
@@ -869,8 +948,16 @@ impl TurnEngine {
         let drain = async {
             let mut outputs = Vec::new();
             while let Some(chunk) = rx.recv().await {
-                if let ToolOutputChunk::Text(text) = &chunk {
-                    outputs.push(text.clone());
+                match &chunk {
+                    ToolOutputChunk::Text(text) => outputs.push(text.clone()),
+                    ToolOutputChunk::Stdout(bytes) => {
+                        outputs.push(String::from_utf8_lossy(bytes).into_owned())
+                    }
+                    ToolOutputChunk::Stderr(bytes) => {
+                        for line in String::from_utf8_lossy(bytes).lines() {
+                            outputs.push(format!("[stderr] {line}"));
+                        }
+                    }
                 }
             }
             outputs
@@ -914,11 +1001,63 @@ impl TurnEngine {
                 .await?;
                 Ok(())
             }
+            Err(ToolRuntimeError::ResourceConflict(reason)) => {
+                // §18.2：源文件在补丁生成后被外部修改 → change.conflicted，禁止覆盖。
+                self.append(
+                    session_id,
+                    turn_id,
+                    "change.conflicted",
+                    Durability::Durable,
+                    json!({ "tool_call_id": tool_call_id, "resource": reason }),
+                )
+                .await?;
+                self.fail_tool(session_id, turn_id, tool_call_id, &reason)
+                    .await
+            }
             Err(err) => {
                 self.fail_tool(session_id, turn_id, tool_call_id, &err.to_string())
                     .await
             }
         }
+    }
+
+    /// 恢复（回滚）到指定 Checkpoint：显式用户操作（§24 一键回滚，force 覆盖）。
+    pub async fn restore_checkpoint(
+        &self,
+        session_id: SessionId,
+        checkpoint_id: &str,
+        idempotency_key: Option<String>,
+    ) -> Result<serde_json::Value, TurnError> {
+        if let Some(key) = &idempotency_key {
+            let cached = self
+                .done
+                .lock()
+                .expect("done map poisoned")
+                .get(key)
+                .cloned();
+            // 回滚结果复用幂等缓存结构中 latest_sequence 之外的字段意义有限，
+            // 这里仅防重复执行：命中即直接返回成功载荷。
+            if cached.is_some() {
+                return Ok(json!({ "checkpoint_id": checkpoint_id, "restored": true }));
+            }
+        }
+
+        let info = self.sessions.status(session_id).await?;
+        if info.status.is_terminal() {
+            return Err(TurnError::InvalidState(info.status));
+        }
+        let restored = self
+            .checkpoints
+            .restore(checkpoint_id, &self.workspace, true)
+            .await
+            .map_err(|e| TurnError::Checkpoint(e.to_string()))?;
+        self.append_no_turn(
+            session_id,
+            "checkpoint.restored",
+            json!({ "checkpoint_id": checkpoint_id, "files": restored }),
+        )
+        .await?;
+        Ok(json!({ "checkpoint_id": checkpoint_id, "restored": true, "files": restored }))
     }
 
     async fn reject_tool(
@@ -1311,14 +1450,46 @@ impl TurnEngine {
         durability: Durability,
         payload: Value,
     ) -> Result<u64, TurnError> {
-        let envelope = EventEnvelope::draft(
+        self.append_envelope(
             session_id,
             Some(turn_id),
             event_type,
             durability,
             Actor::agent("primary"),
             payload,
-        );
+        )
+        .await
+    }
+
+    /// Turn 之外的用户操作事件（如 checkpoint.restored）。
+    async fn append_no_turn(
+        &self,
+        session_id: SessionId,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<u64, TurnError> {
+        self.append_envelope(
+            session_id,
+            None,
+            event_type,
+            Durability::Durable,
+            Actor::user("local"),
+            payload,
+        )
+        .await
+    }
+
+    async fn append_envelope(
+        &self,
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+        event_type: &str,
+        durability: Durability,
+        actor: codedock_protocol::Actor,
+        payload: Value,
+    ) -> Result<u64, TurnError> {
+        let envelope =
+            EventEnvelope::draft(session_id, turn_id, event_type, durability, actor, payload);
         self.store
             .append(envelope)
             .await
@@ -1478,6 +1649,16 @@ mod tests {
         }
     }
 
+    fn test_checkpoint_store() -> Arc<dyn codedock_checkpoint_manager::CheckpointStore> {
+        Arc::new(codedock_checkpoint_manager::DiskCheckpointStore::new(
+            std::env::temp_dir().join(format!(
+                "codedock-ckpt-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7().simple()
+            )),
+        ))
+    }
+
     fn registry_with_file_read(root: &PathBuf) -> Arc<ToolRegistry> {
         let mut tools = ToolRegistry::new();
         tools
@@ -1512,6 +1693,8 @@ mod tests {
             }),
             tools,
             Arc::new(DefaultPolicyEngine),
+            test_checkpoint_store(),
+            std::env::temp_dir(),
             limits,
         );
         (sessions, engine)
@@ -1768,6 +1951,7 @@ mod tests {
             path_arg: "important.txt".into(),
         }) as Box<dyn ToolExecutor>]);
         let (sessions, engine) = engine_with(provider, tools, SessionBudgetLimits::default()).await;
+        std::fs::write(std::env::temp_dir().join("important.txt"), "旧内容").unwrap();
         let info = sessions
             .create(codedock_protocol::SessionMode::Edit, None, None)
             .await
@@ -1964,6 +2148,7 @@ mod tests {
         };
 
         let session_id;
+        std::fs::write(std::env::temp_dir().join("x.txt"), "待写入").unwrap();
         let (store, sessions, providers, tools) = make_parts();
         {
             let engine = TurnEngine::new(
@@ -1972,6 +2157,8 @@ mod tests {
                 providers.clone(),
                 tools.clone(),
                 Arc::new(DefaultPolicyEngine),
+                test_checkpoint_store(),
+                std::env::temp_dir(),
                 SessionBudgetLimits::default(),
             );
             let info = sessions
@@ -2000,6 +2187,8 @@ mod tests {
             providers.clone(),
             tools.clone(),
             Arc::new(DefaultPolicyEngine),
+            test_checkpoint_store(),
+            std::env::temp_dir(),
             SessionBudgetLimits::default(),
         )
         .await
@@ -2021,6 +2210,106 @@ mod tests {
         assert_eq!(final_out.text, "恢复后完成。");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn file_patch_creates_checkpoint_and_reports_conflict() {
+        let ws = std::env::temp_dir().join(format!(
+            "codedock-turn-patch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        tokio::fs::create_dir_all(&ws).await.unwrap();
+        tokio::fs::write(ws.join("doc.txt"), "第一版内容\n")
+            .await
+            .unwrap();
+        let sha_v1 = codedock_checkpoint_manager::hash_content("第一版内容\n".as_bytes());
+
+        let provider = Arc::new(MockProvider::new("mock", "mock-model"));
+        provider.push_script(vec![ChatDelta::ToolProposal {
+            name: "file.patch".into(),
+            arguments: json!({
+                "path": "doc.txt",
+                "expected_sha256": sha_v1,
+                "patches": [ { "find": "第一版内容", "replace": "第二版内容" } ]
+            }),
+        }]);
+        provider.push_script(vec![ChatDelta::Text("补丁已应用。".into())]);
+        // 冲突场景：基于第一版生成的过期补丁
+        provider.push_script(vec![ChatDelta::ToolProposal {
+            name: "file.patch".into(),
+            arguments: json!({
+                "path": "doc.txt",
+                "expected_sha256": sha_v1,
+                "patches": [ { "find": "第一版内容", "replace": "第三版" } ]
+            }),
+        }]);
+        provider.push_script(vec![ChatDelta::Text("检测到冲突，已停止。".into())]);
+
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Box::new(codedock_tool_runtime::FilePatchTool::new(&ws)))
+            .unwrap();
+        let (sessions, engine) =
+            engine_with(provider, Arc::new(tools), SessionBudgetLimits::default()).await;
+        // 引擎工作区指向测试工作区
+        let engine = {
+            // 直接借用 engine 内部字段重建（测试专用路径）
+            TurnEngine::new(
+                engine.store.clone(),
+                engine.sessions.clone(),
+                engine.providers.clone(),
+                engine.tools.clone(),
+                engine.policy.clone(),
+                engine.checkpoints.clone(),
+                ws.clone(),
+                SessionBudgetLimits::default(),
+            )
+        };
+
+        let info = sessions
+            .create(codedock_protocol::SessionMode::Edit, None, None)
+            .await
+            .unwrap();
+        // Medium 写操作在默认语境下升级为审批（§18.1）
+        let out = engine
+            .send_message(info.session_id, "改文档", None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, TurnStatus::WaitingApproval);
+        let pending_id = out.pending_tool_call_id.expect("应有待审批 id");
+        let out = engine
+            .resolve_approval(info.session_id, &pending_id, true, None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, TurnStatus::Completed);
+        let content = tokio::fs::read_to_string(ws.join("doc.txt")).await.unwrap();
+        assert_eq!(content, "第二版内容\n");
+
+        let types = durable_types(&engine, info.session_id).await;
+        assert!(types.contains(&"checkpoint.created".to_string()));
+        assert!(types.contains(&"tool.call.approved".to_string()));
+        assert!(types.contains(&"tool.call.completed".to_string()));
+
+        // 第二轮：stale hash → Preflight 即 change.conflicted，不进入审批
+        let out = engine
+            .send_message(info.session_id, "再来一次旧补丁", None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, TurnStatus::Completed);
+        let types = durable_types(&engine, info.session_id).await;
+        assert!(types.contains(&"change.conflicted".to_string()));
+        assert!(types.contains(&"tool.call.rejected".to_string()));
+        // 冲突轮不产生第二个 completed（本轮无 started）
+        assert_eq!(
+            types.iter().filter(|t| **t == "tool.call.started").count(),
+            1,
+            "只有第一轮补丁实际执行"
+        );
+        let content = tokio::fs::read_to_string(ws.join("doc.txt")).await.unwrap();
+        assert_eq!(content, "第二版内容\n", "冲突时不得覆盖文件");
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[tokio::test]

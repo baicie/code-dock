@@ -35,6 +35,12 @@ enum Commands {
     Status { session_id: String },
     /// 发送一条用户消息并等待本轮对话完成（同步返回助手最终回复）。
     Message { session_id: String, text: String },
+    /// 一键回滚到指定 Checkpoint（§24；覆盖快照后的变更）。
+    Rollback {
+        session_id: String,
+        /// 用 `codedock events <session_id>` 查找 checkpoint.created 事件获取 id。
+        checkpoint_id: String,
+    },
     /// 裁决等待中的工具审批（§9.1：approve_once / deny）。
     Approve {
         session_id: String,
@@ -85,6 +91,17 @@ async fn main() -> anyhow::Result<()> {
         Commands::Message { session_id, text } => (
             "session.message",
             json!({ "session_id": session_id, "text": text, "idempotency_key": new_key() }),
+        ),
+        Commands::Rollback {
+            session_id,
+            checkpoint_id,
+        } => (
+            "checkpoint.restore",
+            json!({
+                "session_id": session_id,
+                "checkpoint_id": checkpoint_id,
+                "idempotency_key": new_key()
+            }),
         ),
         Commands::Approve {
             session_id,

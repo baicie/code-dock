@@ -216,6 +216,7 @@ async fn assemble_runtime(
             Arc::new(registry),
             tools,
             policy,
+            model.routes.clone(),
             checkpoints,
             workspace.to_path_buf(),
             model.limits,

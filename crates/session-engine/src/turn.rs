@@ -32,7 +32,9 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use codedock_checkpoint_manager::CheckpointStore;
 use codedock_event_store::EventStore;
-use codedock_model_gateway::{ChatDelta, ModelProvider, ProviderRegistry, SessionBudgetLimits};
+use codedock_model_gateway::{
+    ChatDelta, ModelProvider, ProviderRegistry, RoutingConfig, SessionBudgetLimits, TaskKind,
+};
 use codedock_policy_engine::{PolicyContext, PolicyDecision, PolicyEngine};
 use codedock_protocol::{
     Actor, Capability, Classification, ContextBudget, ContextItem, ContextItemContent,
@@ -126,6 +128,8 @@ struct PendingApproval {
     plan: ToolExecutionPlan,
     original_key: Option<String>,
     expires_at: DateTime<Utc>,
+    /// 审批后继续 Turn 时的任务路由（与原始消息一致）。
+    task_kind: TaskKind,
 }
 
 /// 模型一轮输出中提取的工具提案。
@@ -141,6 +145,8 @@ pub struct TurnEngine {
     providers: Arc<ProviderRegistry>,
     tools: Arc<ToolRegistry>,
     policy: Arc<dyn PolicyEngine>,
+    /// 按任务类型的模型路由（§11.3）。
+    routes: RoutingConfig,
     /// 写操作前的文件快照（§3.5 / §20.1）。
     checkpoints: Arc<dyn CheckpointStore>,
     /// 工作区根（Checkpoint 快照的读取边界）。
@@ -163,6 +169,7 @@ impl TurnEngine {
         providers: Arc<ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         policy: Arc<dyn PolicyEngine>,
+        routes: RoutingConfig,
         checkpoints: Arc<dyn CheckpointStore>,
         workspace: PathBuf,
         limits: SessionBudgetLimits,
@@ -173,6 +180,7 @@ impl TurnEngine {
             providers,
             tools,
             policy,
+            routes,
             checkpoints,
             workspace,
             limits,
@@ -198,6 +206,7 @@ impl TurnEngine {
         providers: Arc<ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         policy: Arc<dyn PolicyEngine>,
+        routes: RoutingConfig,
         checkpoints: Arc<dyn CheckpointStore>,
         workspace: PathBuf,
         limits: SessionBudgetLimits,
@@ -208,6 +217,7 @@ impl TurnEngine {
             providers,
             tools,
             policy,
+            routes,
             checkpoints,
             workspace,
             limits,
@@ -265,6 +275,7 @@ impl TurnEngine {
                                 plan: snap.plan,
                                 original_key: snap.original_key,
                                 expires_at: snap.expires_at,
+                                task_kind: snap.task_kind,
                             };
                             engine
                                 .pending
@@ -326,7 +337,54 @@ impl TurnEngine {
             return Err(TurnError::TurnInProgress(session_id));
         }
         let outcome = self
-            .begin_turn(session_id, text.into(), idempotency_key)
+            .begin_turn(
+                session_id,
+                text.into(),
+                TaskKind::default(),
+                idempotency_key,
+            )
+            .await;
+        self.busy
+            .lock()
+            .expect("busy set poisoned")
+            .remove(&session_id);
+        outcome
+    }
+
+    /// 发送消息并按任务类型路由（§11.3）；默认 [`TaskKind::Coding`]。
+    pub async fn send_message_task(
+        &self,
+        session_id: SessionId,
+        text: impl Into<String>,
+        task_kind: TaskKind,
+        idempotency_key: Option<String>,
+    ) -> Result<TurnOutcome, TurnError> {
+        if let Some(key) = &idempotency_key {
+            let cached = self
+                .done
+                .lock()
+                .expect("done map poisoned")
+                .get(key)
+                .cloned();
+            if let Some(outcome) = cached {
+                return Ok(outcome);
+            }
+        }
+
+        let info = self.sessions.status(session_id).await?;
+        if info.status != SessionStatus::Running {
+            return Err(TurnError::InvalidState(info.status));
+        }
+        if !self
+            .busy
+            .lock()
+            .expect("busy set poisoned")
+            .insert(session_id)
+        {
+            return Err(TurnError::TurnInProgress(session_id));
+        }
+        let outcome = self
+            .begin_turn(session_id, text.into(), task_kind, idempotency_key)
             .await;
         self.busy
             .lock()
@@ -410,7 +468,7 @@ impl TurnEngine {
                 .exit_waiting_approval(session_id, None)
                 .await?;
             let outcome = self
-                .agent_loop(session_id, turn_id, idempotency_key)
+                .agent_loop(session_id, turn_id, idempotency_key, pending.task_kind)
                 .await?;
             self.cache_outcome(&pending.original_key, &outcome);
             return Ok(outcome);
@@ -458,7 +516,7 @@ impl TurnEngine {
             .await?;
         }
         let outcome = self
-            .agent_loop(session_id, turn_id, idempotency_key)
+            .agent_loop(session_id, turn_id, idempotency_key, pending.task_kind)
             .await?;
         self.cache_outcome(&pending.original_key, &outcome);
         Ok(outcome)
@@ -479,6 +537,7 @@ impl TurnEngine {
         &self,
         session_id: SessionId,
         text: String,
+        task_kind: TaskKind,
         idempotency_key: Option<String>,
     ) -> Result<TurnOutcome, TurnError> {
         let turn_id = TurnId::generate();
@@ -498,7 +557,8 @@ impl TurnEngine {
             json!({ "role": "user", "text": text }),
         )
         .await?;
-        self.agent_loop(session_id, turn_id, idempotency_key).await
+        self.agent_loop(session_id, turn_id, idempotency_key, task_kind)
+            .await
     }
 
     /// Agent 循环：模型调用 →（可选）工具执行 → 结果回填 → 直到最终回复或挂起等审批。
@@ -507,11 +567,15 @@ impl TurnEngine {
         session_id: SessionId,
         turn_id: TurnId,
         idempotency_key: Option<String>,
+        task_kind: TaskKind,
     ) -> Result<TurnOutcome, TurnError> {
+        // §11.3：按任务类型路由 Provider；route.model 覆盖默认模型。
+        let route = task_kind.route(&self.routes).cloned();
         let provider = self
             .providers
-            .default_provider()
+            .resolve(route.as_ref())
             .ok_or(TurnError::NoProvider)?;
+        let model_override = route.as_ref().map(|r| r.model.clone());
 
         loop {
             self.check_budget(session_id).await?;
@@ -520,7 +584,12 @@ impl TurnEngine {
             let task = info.task;
 
             let snapshot = self
-                .assemble_snapshot(&provider, session_id, task.as_deref())
+                .assemble_snapshot(
+                    &provider,
+                    session_id,
+                    task.as_deref(),
+                    model_override.as_deref(),
+                )
                 .await?;
             let model_request_id = snapshot.model_request_id;
             let used_input_tokens = snapshot.budget.used_input_tokens;
@@ -691,6 +760,7 @@ impl TurnEngine {
                     proposal.arguments.clone(),
                     session_mode,
                     idempotency_key.clone(),
+                    task_kind,
                 )
                 .await?
             {
@@ -726,6 +796,7 @@ impl TurnEngine {
         arguments: Value,
         session_mode: SessionMode,
         original_key: Option<String>,
+        task_kind: TaskKind,
     ) -> Result<ToolFlow, TurnError> {
         self.check_tool_budget(session_id).await?;
         let tool_call_id = ToolCallId::generate();
@@ -845,6 +916,7 @@ impl TurnEngine {
                     original_key,
                     plan,
                     expires_at,
+                    task_kind,
                 };
                 self.append(
                     session_id,
@@ -862,6 +934,7 @@ impl TurnEngine {
                         "expires_at": expires_at.to_rfc3339(),
                         "plan": pending.plan,
                         "command_key": pending.original_key,
+                        "task_kind": pending.task_kind,
                     }),
                 )
                 .await?;
@@ -1208,14 +1281,33 @@ impl TurnEngine {
         provider: &Arc<dyn ModelProvider>,
         session_id: SessionId,
         task: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<ContextSnapshot, TurnError> {
         let models = provider
             .list_models()
             .await
             .map_err(|e| TurnError::Model(e.to_string()))?;
-        let model = models
-            .first()
-            .ok_or_else(|| TurnError::Model("Provider 未提供任何模型".to_string()))?;
+        // route.model 优先；未命中清单时回退首个并告警（§11.3）。
+        let model = match model_override {
+            Some(want) => match models.iter().find(|m| m.id == *want) {
+                Some(m) => m.clone(),
+                None => {
+                    tracing::warn!(
+                        provider = %provider.id(),
+                        model = %want,
+                        "路由指定的模型不在 Provider 清单中，回退默认模型"
+                    );
+                    models
+                        .first()
+                        .ok_or_else(|| TurnError::Model("Provider 未提供任何模型".to_string()))?
+                        .clone()
+                }
+            },
+            None => models
+                .first()
+                .ok_or_else(|| TurnError::Model("Provider 未提供任何模型".to_string()))?
+                .clone(),
+        };
         let model_ref = ModelRef {
             provider: provider.id().to_string(),
             model: model.id.clone(),
@@ -1521,6 +1613,8 @@ struct PendingApprovalSnapshot {
     #[serde(default, rename = "command_key")]
     original_key: Option<String>,
     expires_at: DateTime<Utc>,
+    #[serde(default)]
+    task_kind: TaskKind,
 }
 
 impl From<ToolRuntimeError> for TurnError {
@@ -1693,6 +1787,7 @@ mod tests {
             }),
             tools,
             Arc::new(DefaultPolicyEngine),
+            RoutingConfig::default(),
             test_checkpoint_store(),
             std::env::temp_dir(),
             limits,
@@ -2157,6 +2252,7 @@ mod tests {
                 providers.clone(),
                 tools.clone(),
                 Arc::new(DefaultPolicyEngine),
+                RoutingConfig::default(),
                 test_checkpoint_store(),
                 std::env::temp_dir(),
                 SessionBudgetLimits::default(),
@@ -2187,6 +2283,7 @@ mod tests {
             providers.clone(),
             tools.clone(),
             Arc::new(DefaultPolicyEngine),
+            RoutingConfig::default(),
             test_checkpoint_store(),
             std::env::temp_dir(),
             SessionBudgetLimits::default(),
@@ -2261,6 +2358,7 @@ mod tests {
                 engine.providers.clone(),
                 engine.tools.clone(),
                 engine.policy.clone(),
+                engine.routes.clone(),
                 engine.checkpoints.clone(),
                 ws.clone(),
                 SessionBudgetLimits::default(),
@@ -2310,6 +2408,82 @@ mod tests {
         assert_eq!(content, "第二版内容\n", "冲突时不得覆盖文件");
 
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn task_kind_routes_to_configured_provider() {
+        // §11.3：routes.coding → provider "b"；planning 未配置 → 回退默认 "a"。
+        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+        let sessions: Arc<dyn SessionManager> =
+            Arc::new(EventSourcedSessionManager::new(store.clone()));
+
+        let a = Arc::new(MockProvider::new("a", "model-a"));
+        a.push_script(vec![ChatDelta::Text("来自默认 a".into())]);
+        a.push_script(vec![ChatDelta::Text("来自 planning 的 a".into())]);
+        let b = Arc::new(MockProvider::new("b", "model-b"));
+        b.push_script(vec![ChatDelta::Text("来自路由 b".into())]);
+
+        let mut reg = ProviderRegistry::new();
+        reg.register(a);
+        reg.register(b);
+
+        let routes = RoutingConfig {
+            coding: Some(codedock_model_gateway::ModelRoute {
+                provider: "b".into(),
+                model: "model-b".into(),
+            }),
+            planning: None,
+            summarization: None,
+        };
+
+        let engine = TurnEngine::new(
+            store,
+            sessions.clone(),
+            Arc::new(reg),
+            registry_with_file_read(&std::env::temp_dir()),
+            Arc::new(DefaultPolicyEngine),
+            routes,
+            test_checkpoint_store(),
+            std::env::temp_dir(),
+            SessionBudgetLimits::default(),
+        );
+        let info = sessions
+            .create(codedock_protocol::SessionMode::Ask, None, None)
+            .await
+            .unwrap();
+
+        let out = engine
+            .send_message_task(info.session_id, "你好", TaskKind::Coding, None)
+            .await
+            .unwrap();
+        assert_eq!(out.text, "来自路由 b", "coding 路由到 provider b");
+
+        let out = engine
+            .send_message_task(info.session_id, "你好", TaskKind::Planning, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.text, "来自默认 a",
+            "planning 未配置路由 → 回退默认 provider"
+        );
+
+        // 快照中的 model 也应跟随路由（model-b vs model-a）
+        let events = engine
+            .store
+            .load(info.session_id, 0, EVENT_SCAN_LIMIT, true)
+            .await
+            .unwrap();
+        let providers: Vec<String> = events
+            .iter()
+            .filter(|e| e.event_type == "model.request.started")
+            .map(|e| {
+                e.payload["provider"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(providers, vec!["b".to_string(), "a".to_string()]);
     }
 
     #[tokio::test]

@@ -108,7 +108,7 @@ pub struct ModelRoute {
 }
 
 /// 按任务类型的路由表（§11.3）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RoutingConfig {
     #[serde(default)]
     pub planning: Option<ModelRoute>,
@@ -116,6 +116,27 @@ pub struct RoutingConfig {
     pub coding: Option<ModelRoute>,
     #[serde(default)]
     pub summarization: Option<ModelRoute>,
+}
+
+/// 任务类型（§11.3 路由键）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    Planning,
+    #[default]
+    Coding,
+    Summarization,
+}
+
+impl TaskKind {
+    /// 该任务类型命中的路由（未配置则 None，回退默认 Provider）。
+    pub fn route<'a>(&self, cfg: &'a RoutingConfig) -> Option<&'a ModelRoute> {
+        match self {
+            TaskKind::Planning => cfg.planning.as_ref(),
+            TaskKind::Coding => cfg.coding.as_ref(),
+            TaskKind::Summarization => cfg.summarization.as_ref(),
+        }
+    }
 }
 
 /// Session 级预算上限（§18.3：无限循环和费用失控防护）。

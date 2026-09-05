@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use codedock_model_gateway::SessionBudgetLimits;
+use codedock_model_gateway::{RoutingConfig, SessionBudgetLimits};
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,9 @@ pub struct ModelLayerConfig {
     pub default_provider: String,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// 按任务类型的路由（§11.3）；未配置的任务类型回退 default_provider。
+    #[serde(default)]
+    pub routes: RoutingConfig,
     #[serde(default)]
     pub limits: SessionBudgetLimits,
 }
@@ -61,6 +64,7 @@ impl Default for ModelLayerConfig {
         Self {
             default_provider: default_provider_id(),
             providers,
+            routes: RoutingConfig::default(),
             limits: SessionBudgetLimits::default(),
         }
     }
@@ -120,6 +124,38 @@ mod tests {
             cfg.providers.get("mock"),
             Some(ProviderSettings::Mock { .. })
         ));
+    }
+
+    #[test]
+    fn toml_routes_parse() {
+        let dir = std::env::temp_dir().join(format!(
+            "codedock-cfg-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("routes.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_provider = "local"
+
+[providers.local]
+type = "mock"
+
+[routes.planning]
+provider = "local"
+model = "reasoner"
+"#,
+        )
+        .unwrap();
+
+        let cfg = ModelLayerConfig::load(&path).unwrap();
+        let planning = cfg.routes.planning.as_ref().expect("planning 路由应存在");
+        assert_eq!(planning.provider, "local");
+        assert_eq!(planning.model, "reasoner");
+        assert!(cfg.routes.coding.is_none(), "未配置的任务类型为 None");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

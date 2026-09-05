@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::ModelProvider;
+use crate::{ModelProvider, ModelRoute};
 
 /// 已注册 Provider 集合 + 默认 Provider。
 #[derive(Default)]
@@ -46,6 +46,14 @@ impl ProviderRegistry {
         self.default.as_deref().and_then(|id| self.get(id))
     }
 
+    /// 按任务类型路由（§11.3）：命中 route 用 route.provider，
+    /// route 缺失或其 provider 未注册时回退默认 Provider。
+    pub fn resolve(&self, route: Option<&ModelRoute>) -> Option<Arc<dyn ModelProvider>> {
+        route
+            .and_then(|r| self.get(&r.provider))
+            .or_else(|| self.default_provider())
+    }
+
     /// 已注册 Provider id（字典序，用于诊断展示）。
     pub fn ids(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
@@ -73,5 +81,27 @@ mod tests {
 
         assert!(reg.set_default("missing").is_err());
         assert!(reg.get("missing").is_none());
+    }
+
+    #[test]
+    fn resolve_follows_route_with_fallback_to_default() {
+        use crate::ModelRoute;
+        let mut reg = ProviderRegistry::new();
+        reg.register(Arc::new(MockProvider::new("mock", "m1")));
+        reg.register(Arc::new(MockProvider::new("cloud", "m2")));
+
+        let route = ModelRoute {
+            provider: "cloud".into(),
+            model: "m2".into(),
+        };
+        assert_eq!(reg.resolve(Some(&route)).unwrap().id(), "cloud");
+
+        // 未注册的 provider → 回退默认
+        let bad = ModelRoute {
+            provider: "ghost".into(),
+            model: "x".into(),
+        };
+        assert_eq!(reg.resolve(Some(&bad)).unwrap().id(), "mock");
+        assert_eq!(reg.resolve(None).unwrap().id(), "mock");
     }
 }

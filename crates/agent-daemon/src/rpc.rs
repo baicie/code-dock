@@ -86,6 +86,9 @@ struct Command {
     /// 审批响应：`approve_once` | `deny`（§9.1 allowed_responses）。
     #[serde(default, rename = "response")]
     response: Option<String>,
+    /// 任务类型路由（§11.3）：planning | coding | summarization。
+    #[serde(default, rename = "task_type")]
+    task_type: Option<String>,
     #[serde(default, rename = "after_sequence")]
     after_sequence: Option<u64>,
     #[serde(default, rename = "durable_only")]
@@ -180,7 +183,20 @@ async fn run(runtime: &Runtime, method: &str, params: Value) -> Result<Value, Rp
         "session.message" => {
             let id = cmd.require_session()?;
             let text = cmd.require_text()?;
-            let outcome = runtime.turns.send_message(id, text, cmd.key()).await?;
+            let task_kind = match cmd.task_type.as_deref() {
+                None | Some("coding") => codedock_model_gateway::TaskKind::Coding,
+                Some("planning") => codedock_model_gateway::TaskKind::Planning,
+                Some("summarization") => codedock_model_gateway::TaskKind::Summarization,
+                Some(other) => {
+                    return Err(invalid(format!(
+                        "task_type 必须是 planning/coding/summarization（当前: {other}）"
+                    )));
+                }
+            };
+            let outcome = runtime
+                .turns
+                .send_message_task(id, text, task_kind, cmd.key())
+                .await?;
             Ok(serde_json::to_value(outcome)?)
         }
 
@@ -375,6 +391,29 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, codes::CODEDOCK_ERROR);
         assert!(err.message.contains("Paused"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn task_type_routes_to_configured_provider() {
+        // assemble_in_memory 只注册 mock；这里通过 runtime.info 验证 task_type 参数校验，
+        // 路由选择本身由 session-engine 测试覆盖。
+        let runtime = assemble_in_memory().await;
+        let (sid, _) = create_session(&runtime, "ask").await;
+        let resp = dispatch(
+            &runtime,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: JsonRpcId::String("t-task".into()),
+                method: "session.message".into(),
+                params: Some(json!({
+                    "session_id": sid,
+                    "text": "你好",
+                    "task_type": "no-such-kind",
+                })),
+            },
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, codes::INVALID_PARAMS);
     }
 
     #[tokio::test]

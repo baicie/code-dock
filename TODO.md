@@ -62,8 +62,11 @@
   - [x] SnapshotBuilder 预算装箱 + Selection Report 落事件（§8.4.9 / §12.3，退出标准"用户能查看选中和未选中上下文的原因"达成）
   - [x] Secret 检测/脱敏统一管线：五类常见密钥形态，内容级 Redact 变换记录（§18.5）
   - [x] `audit_payload` + `final_request_sha256`（§8.4.1，退出标准"任意模型请求可还原本地发送的最终载荷"达成）
-  - [ ] ripgrep + Tree-sitter 符号索引（project-index，§12.1/§12.2）
-  - [ ] 检索顺序接入（关键词/符号/Git/Diagnostics 检索来源作为 Retriever）
+  - [x] Tree-sitter 符号索引（project-index：Rust/Python/TS/JS）+ `search.symbol` 工具（§12.1 #4）；文本搜索统一到 project-index
+  - [x] 项目规则进上下文：CodeDock.md + .codedock/rules/*.md 作为 project_rule 候选（§12.1 #2）
+  - [ ] ripgrep 二进制 / SQLite FTS5 替换纯 Rust 文本搜索（性能瓶颈出现时，§12.1 #3）
+  - [ ] 文件监听增量更新（notify）与索引持久化（§12.2）
+  - [ ] Git/Diagnostics 检索来源作为 Retriever（§12.1 #5/#6）
   - [ ] Trust/Role 溯源管线细化（§18.1：按内容来源放宽副作用工具的保守审批）
   - [ ] Visual Replay 事件回放视图（阶段 4 UI 的前置）
 - [ ] **阶段 4** Desktop DevTools Alpha：Tauri 2 + React，Console/Context/Tools/Network/Changes/Trace/Security 面板（§14），Monaco + xterm.js。

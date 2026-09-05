@@ -12,13 +12,14 @@
 - ✅ **模型层**：`ModelProvider` trait（§11.1 统一能力）、OpenAI-Compatible Provider（SSE 流式、密钥仅经 SecretStore）、MockProvider（可脚本化回放 + 回声）、RoutingConfig、SessionBudgetLimits（§11.3 / §18.3）。
 - 🚧 **阶段 1 收尾**：模型层已就绪但尚未接入 session-engine / daemon 的 Turn 循环。
 
-## 阶段 1 收尾（进行中）
+## 阶段 1 收尾（2026-09-05 完成）
 
-- [ ] **装配模型层**：agent-daemon 装配 model-gateway（`main.rs` 已留 TODO），session-engine Turn 循环调用 `stream_chat`，`message.delta` / `message.completed` 事件落 Event Store。
-- [ ] **模型路由接线**：RoutingConfig（§11.3）→ 按任务类型选择 Provider；密钥经 secret-store 注入。
-- [ ] **CLI 端到端验证**：无 GUI 完成一次纯对话 Session（创建 → 流式输出 → 暂停 → 恢复 → 取消）。
-- [ ] **断线重连测试**：`session.subscribe` + `after_sequence` 补发 Durable Event 无丢失（§8.2.5，阶段 1 退出标准）。
-- [ ] **（可选，CI 备注）**：Named Pipe IPC 后补 `windows-latest` 到 CI matrix（§18.8）。
+- [x] **装配模型层**：agent-daemon 装配 `Runtime`（会话管理 + TurnEngine）；TurnEngine 执行完整事件编排：`turn.started` → 用户 `message.created` → `context.snapshot.created`（§8.4 快照含 system prompt/任务/全部历史）→ `model.request.started` → `message.delta`（transient）→ `message.completed`（durable，幂等键锚点）→ `model.request.completed` → `turn.completed`。
+- [x] **模型路由（默认 Provider）**：ProviderRegistry + config.toml（`[providers.*]`、`default_provider`、`[limits]`）；无配置文件回退内置 Mock，daemon 开箱即用；密钥经 `CODEDOCK_PROVIDER_<ID>_API_KEY` 注入 SecretStore（Keychain TODO）。
+- [x] **预算防护（§18.3）**：SessionBudgetLimits 在每轮开始前从 Durable Event 统计已用轮次/Token，触达上限拒绝；并发同会话消息防交错；Provider 失败仅失败当前 Turn。
+- [x] **CLI 端到端验证**：`codedock message` 子命令；集成测试覆盖真实 UDS 全链路 + 冒烟验证 创建→对话→暂停（拒发）→恢复→取消 完整生命周期。
+- [x] **断线重连测试**：`session.subscribe` 实时推送仍为 TODO（ipc.rs），但重连补发路径已锁定：`session.events` + `after_sequence` 补发全部 Durable Event、sequence 严格单调、transient 不补发（§8.2.5）。
+- [ ] **（阶段 1 遗留，非阻塞）**：`session.subscribe` 实时事件推送（服务器主动推送）；Named Pipe IPC 后补 `windows-latest` CI matrix（§18.8）；按任务类型路由（planning/coding/summarization，§11.3——当前只有默认 Provider）。
 
 ## 阶段 2：安全 Tool 闭环（下一个大块）
 
@@ -58,7 +59,7 @@
 - [ ] Blob 内容条目不发送给 Provider（阶段 1 仅内联文本，见 `snapshot_to_messages`）。
 - [ ] `count_tokens` 为估算值（chars/4），接入真实 tokenizer 待定（§18.6）。
 - [ ] Tool Calling / StructuredOutput Capability 已声明但未实现（模型产出 Tool Proposal 是阶段 2 事项）。
-- [ ] Session 级预算上限（SessionBudgetLimits）已定义类型，尚未在 Turn 循环中强制执行（§18.3）。
+- [ ] TurnEngine 暂停语义为"轮间暂停"：Turn 进行中的 Pause 不打断当轮，仅拒绝后续消息；Turn 中断/恢复需要取消令牌（§8.2.7 完整状态机在阶段 2 补齐）。
 
 ## MVP 验收（最终门槛，§24）
 

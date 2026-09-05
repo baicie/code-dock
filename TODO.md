@@ -19,7 +19,8 @@
 - [x] **预算防护（§18.3）**：SessionBudgetLimits 在每轮开始前从 Durable Event 统计已用轮次/Token，触达上限拒绝；并发同会话消息防交错；Provider 失败仅失败当前 Turn。
 - [x] **CLI 端到端验证**：`codedock message` 子命令；集成测试覆盖真实 UDS 全链路 + 冒烟验证 创建→对话→暂停（拒发）→恢复→取消 完整生命周期。
 - [x] **断线重连测试**：`session.subscribe` 实时推送仍为 TODO（ipc.rs），但重连补发路径已锁定：`session.events` + `after_sequence` 补发全部 Durable Event、sequence 严格单调、transient 不补发（§8.2.5）。
-- [ ] **（阶段 1 遗留，非阻塞）**：`session.subscribe` 实时事件推送（服务器主动推送）；Named Pipe IPC 后补 `windows-latest` CI matrix（§18.8）；按任务类型路由（planning/coding/summarization，§11.3——当前只有默认 Provider）。
+- [x] **`session.subscribe` 实时事件推送（§8.2.5，2026-09-05 补齐）**：EventHub 广播总线 + `session.event` notification 推送（durable/transient 都实时），CLI `follow` 实时跟踪；落后以 `session.resync` 通知重新对齐。
+- [ ] **（阶段 1 遗留，非阻塞）**：Named Pipe IPC 后补 `windows-latest` CI matrix（§18.8）；按任务类型路由（planning/coding/summarization，§11.3——当前只有默认 Provider）。
 
 ## 阶段 2：安全 Tool 闭环（下一个大块）
 
@@ -75,7 +76,7 @@
 - [ ] `count_tokens` 为估算值（chars/4），接入真实 tokenizer 待定（§18.6）。
 - [ ] Tool Calling / StructuredOutput Capability 已声明但 Provider 侧未实现（当前由 Mock 脚本驱动提案）。
 - [ ] TurnEngine 暂停语义为"轮间暂停"：Turn 进行中的 Pause 不打断当轮，仅拒绝后续消息；Turn 中断/恢复需要取消令牌（§8.2.7 完整状态机）。
-- [ ] 审批的实时推送通知依赖 `session.subscribe`（当前客户端轮询 `session.events`）。
+- [x] ~~审批的实时推送通知~~：`session.subscribe` 已上线，客户端可实时收到 `tool.call.approval_required`。
 
 ## MVP 验收（最终门槛，§24）
 

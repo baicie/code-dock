@@ -8,9 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use codedock_event_store::EventStore;
-use codedock_protocol::{
-    Actor, Durability, EventEnvelope, SessionId, SessionMode, SessionStatus,
-};
+use codedock_protocol::{Actor, Durability, EventEnvelope, SessionId, SessionMode, SessionStatus};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -463,7 +461,11 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let mgr = EventSourcedSessionManager::new(store.clone());
         let info = mgr
-            .create(SessionMode::Plan, Some("重构模块".into()), Some("k1".into()))
+            .create(
+                SessionMode::Plan,
+                Some("重构模块".into()),
+                Some("k1".into()),
+            )
             .await
             .unwrap();
         mgr.pause(info.session_id, Some("p1".to_string()))
@@ -482,7 +484,11 @@ mod tests {
 
         // 幂等缓存跨重启恢复：重复 create 返回同一会话，不追加事件。
         let again = restored
-            .create(SessionMode::Plan, Some("重构模块".into()), Some("k1".into()))
+            .create(
+                SessionMode::Plan,
+                Some("重构模块".into()),
+                Some("k1".into()),
+            )
             .await
             .unwrap();
         assert_eq!(again.session_id, info.session_id);

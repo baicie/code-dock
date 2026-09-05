@@ -5,9 +5,12 @@
 //!
 //! [`Runtime`] 是 RPC 层可见的模块组合：会话管理（状态机）+ Turn 引擎（模型调用）。
 
+pub mod bus;
 pub mod config;
 pub mod ipc;
 pub mod rpc;
+
+pub use bus::EventHub;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,6 +29,8 @@ use crate::config::{ModelLayerConfig, ProviderSettings};
 pub struct Runtime {
     pub sessions: Arc<dyn SessionManager>,
     pub turns: Arc<TurnEngine>,
+    /// 实时事件总线（session.subscribe 推送源，§8.2.5）。
+    pub hub: Arc<EventHub>,
 }
 
 /// 依据配置构建 Provider 注册表（§11.2）；OpenAI-Compatible 的密钥
@@ -96,8 +101,9 @@ pub async fn load_env_secrets(model: &ModelLayerConfig, secrets: &Arc<dyn Secret
 
 /// 装配一个内存 Runtime（开发 / 测试用，内置 Mock Provider）。
 pub async fn assemble_in_memory() -> Arc<Runtime> {
+    let hub = Arc::new(EventHub::new());
     let event_store: Arc<dyn codedock_event_store::EventStore> =
-        Arc::new(InMemoryEventStore::new());
+        hub.wrap_store(Arc::new(InMemoryEventStore::new()));
     let checkpoints: Arc<dyn codedock_checkpoint_manager::CheckpointStore> = Arc::new(
         codedock_checkpoint_manager::DiskCheckpointStore::new(std::env::temp_dir().join(format!(
             "codedock-ckpt-mem-{}-{:?}",
@@ -114,6 +120,7 @@ pub async fn assemble_in_memory() -> Arc<Runtime> {
             &ModelLayerConfig::default(),
             &std::env::temp_dir(),
             checkpoints,
+            hub,
         )
         .await,
     )
@@ -126,15 +133,16 @@ pub async fn assemble_sqlite(
     model: &ModelLayerConfig,
     workspace: &Path,
 ) -> anyhow::Result<Runtime> {
-    let event_store: Arc<dyn codedock_event_store::EventStore> = Arc::new(
+    let hub = Arc::new(EventHub::new());
+    let event_store: Arc<dyn codedock_event_store::EventStore> = hub.wrap_store(Arc::new(
         SqliteEventStore::open(data_dir.join("events.db"))
             .await
             .context("打开 SQLite Event Store 失败")?,
-    );
+    ));
     let checkpoints: Arc<dyn codedock_checkpoint_manager::CheckpointStore> = Arc::new(
         codedock_checkpoint_manager::DiskCheckpointStore::new(data_dir.join("checkpoints")),
     );
-    Ok(assemble_runtime(event_store, model, workspace, checkpoints).await)
+    Ok(assemble_runtime(event_store, model, workspace, checkpoints, hub).await)
 }
 
 /// 内置工具装配：阶段 2 六类核心工具（§23）。
@@ -186,6 +194,7 @@ async fn assemble_runtime(
     model: &ModelLayerConfig,
     workspace: &Path,
     checkpoints: Arc<dyn codedock_checkpoint_manager::CheckpointStore>,
+    hub: Arc<EventHub>,
 ) -> Runtime {
     let sessions: Arc<dyn SessionManager> = Arc::new(
         EventSourcedSessionManager::restore(event_store.clone())
@@ -215,7 +224,11 @@ async fn assemble_runtime(
         .expect("重建 Turn 幂等缓存失败"),
     );
 
-    Runtime { sessions, turns }
+    Runtime {
+        sessions,
+        turns,
+        hub,
+    }
 }
 
 #[cfg(test)]

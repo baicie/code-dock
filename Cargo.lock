@@ -237,6 +237,7 @@ name = "codedock-agent-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "codedock-artifact-store",
  "codedock-checkpoint-manager",

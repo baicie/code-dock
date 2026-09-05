@@ -219,6 +219,22 @@ async fn run(runtime: &Runtime, method: &str, params: Value) -> Result<Value, Rp
             Ok(serde_json::to_value(outcome)?)
         }
 
+        // §8.2.5：订阅响应 = 补发 Durable Event；此后实时事件以
+        // `session.event` notification 推送（由 ipc 层挂接广播订阅）。
+        "session.subscribe" => {
+            let id = cmd.require_session()?;
+            let events = runtime
+                .sessions
+                .events(
+                    id,
+                    cmd.after_sequence.unwrap_or(0),
+                    true,
+                    cmd.limit.unwrap_or(1000).min(10_000),
+                )
+                .await?;
+            Ok(json!({ "session_id": id, "subscribed": true, "events": events }))
+        }
+
         "session.events" => {
             let id = cmd.require_session()?;
             let events = runtime

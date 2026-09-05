@@ -38,6 +38,14 @@ impl Client {
         }
     }
 
+    /// 读取一行（带超时），返回原始字节。
+    async fn read_line(&mut self, timeout: std::time::Duration) -> anyhow::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        tokio::time::timeout(timeout, self.reader.read_until(b'\n', &mut buf)).await??;
+        assert!(!buf.is_empty(), "daemon 提前断开");
+        Ok(buf)
+    }
+
     async fn call(&mut self, id: &str, method: &str, params: Value) -> JsonRpcResponse {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -281,6 +289,79 @@ async fn chat_turn_over_real_ipc() {
         )
         .await;
     assert!(resp.error.is_some());
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// §8.2.5 实时推送：订阅后另一连接产生的 durable 与 transient 事件
+/// 都以 `session.event` notification 实时到达。
+#[tokio::test]
+async fn subscribe_receives_live_pushed_events() {
+    let path = spawn_daemon().await;
+    let mut watcher = Client::connect(&path).await;
+    let mut actor = Client::connect(&path).await;
+
+    let resp = actor
+        .call("1", "session.create", json!({ "mode": "ask" }))
+        .await;
+    let sid = resp.result.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 订阅：响应携带补发的 durable 事件
+    let resp = watcher
+        .call(
+            "2",
+            "session.subscribe",
+            json!({ "session_id": sid, "after_sequence": 0 }),
+        )
+        .await;
+    let replay = resp.result.unwrap();
+    assert_eq!(replay["subscribed"], true);
+    let replayed = replay["events"].as_array().unwrap();
+    assert_eq!(replayed.len(), 2, "created + started 补发");
+    assert_eq!(replayed[0]["event_type"], "session.created");
+
+    // 另一连接触发一轮对话 → watcher 实时收到推送
+    actor
+        .call(
+            "3",
+            "session.message",
+            json!({ "session_id": sid, "text": "你好" }),
+        )
+        .await;
+
+    let mut types: Vec<(u64, String)> = Vec::new();
+    loop {
+        let line = watcher
+            .read_line(std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(v["method"], "session.event", "只应收到事件通知: {v}");
+        let params = &v["params"];
+        types.push((
+            params["sequence"].as_u64().unwrap(),
+            params["event_type"].as_str().unwrap().to_string(),
+        ));
+        if types.last().unwrap().1 == "turn.completed" {
+            break;
+        }
+    }
+
+    let seqs: Vec<u64> = types.iter().map(|(s, _)| *s).collect();
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "推送 sequence 严格单调: {seqs:?}"
+    );
+    let names: Vec<&str> = types.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        names.contains(&"message.delta"),
+        "transient 事件实时推送: {names:?}"
+    );
+    assert!(names.contains(&"message.completed"));
+    assert_eq!(*names.last().unwrap(), "turn.completed");
 
     let _ = std::fs::remove_file(&path);
 }

@@ -62,6 +62,13 @@ enum Commands {
         #[arg(long)]
         mode: String,
     },
+    /// 实时跟踪会话事件流（先补发 durable，再推送实时事件；Ctrl-C 退出）。
+    Follow {
+        session_id: String,
+        /// 从该 sequence 之后开始补发。
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+    },
     /// 重放会话事件流（默认只含 Durable 事件，§8.2.5）。
     Events {
         session_id: String,
@@ -82,7 +89,13 @@ fn new_key() -> String {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if let Commands::Follow { session_id, after } = &cli.command {
+        return run_follow(&cli.socket, session_id, *after).await;
+    }
+
     let (method, params) = match &cli.command {
+        // Follow 已在函数开头分支处理。
+        Commands::Follow { .. } => unreachable!("Follow 已在上方分支处理"),
         Commands::Create { mode, task } => (
             "session.create",
             json!({ "mode": mode, "task": task, "idempotency_key": new_key() }),
@@ -197,6 +210,64 @@ async fn main() -> anyhow::Result<()> {
         _ => println!("{}", serde_json::to_string_pretty(&result)?),
     }
     Ok(())
+}
+
+/// 实时跟踪会话事件流（§8.2.5）。
+async fn run_follow(socket: &str, session_id: &str, after: u64) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|e| anyhow::anyhow!("连接 daemon 失败（{socket}）: {e}"))?;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: JsonRpcId::String(format!("follow-{}", Uuid::now_v7())),
+        method: "session.subscribe".into(),
+        params: Some(json!({ "session_id": session_id, "after_sequence": after })),
+    };
+    let mut line = serde_json::to_vec(&req)?;
+    line.push(b'\n');
+    stream.write_all(&line).await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        reader.read_until(b'\n', &mut buf).await?;
+        if buf.is_empty() {
+            anyhow::bail!("daemon 关闭了连接");
+        }
+        let v: Value = serde_json::from_slice(&buf)?;
+        if let Some(err) = v.get("error") {
+            anyhow::bail!("RPC 错误: {err}");
+        }
+        if v.get("method").and_then(Value::as_str) == Some("session.resync") {
+            println!("⚠ 事件落后，请用 `codedock events` 重新对齐");
+            continue;
+        }
+        if v.get("method").and_then(Value::as_str) == Some("session.event") {
+            let ev = &v["params"];
+            println!(
+                "#{} {} [{}] {}",
+                ev["sequence"],
+                ev["event_type"].as_str().unwrap_or("?"),
+                ev["durability"].as_str().unwrap_or("?"),
+                ev["occurred_at"].as_str().unwrap_or("?"),
+            );
+            continue;
+        }
+        // 订阅响应：补发的 durable 事件
+        if let Some(events) = v["result"]["events"].as_array() {
+            println!("── 补发 {} 条 durable 事件 ──", events.len());
+            for ev in events {
+                println!(
+                    "#{} {} [{}]",
+                    ev["sequence"],
+                    ev["event_type"].as_str().unwrap_or("?"),
+                    ev["durability"].as_str().unwrap_or("?"),
+                );
+            }
+            println!("── 实时跟踪中（Ctrl-C 退出）──");
+        }
+    }
 }
 
 /// 连接 Daemon 并执行一次 JSON-RPC 调用，返回 `result`；RPC 错误转为 Err。

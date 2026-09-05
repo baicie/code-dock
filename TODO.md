@@ -20,7 +20,8 @@
 - [x] **CLI 端到端验证**：`codedock message` 子命令；集成测试覆盖真实 UDS 全链路 + 冒烟验证 创建→对话→暂停（拒发）→恢复→取消 完整生命周期。
 - [x] **断线重连测试**：`session.subscribe` 实时推送仍为 TODO（ipc.rs），但重连补发路径已锁定：`session.events` + `after_sequence` 补发全部 Durable Event、sequence 严格单调、transient 不补发（§8.2.5）。
 - [x] **`session.subscribe` 实时事件推送（§8.2.5，2026-09-05 补齐）**：EventHub 广播总线 + `session.event` notification 推送（durable/transient 都实时），CLI `follow` 实时跟踪；落后以 `session.resync` 通知重新对齐。
-- [ ] **（阶段 1 遗留，非阻塞）**：Named Pipe IPC 后补 `windows-latest` CI matrix（§18.8）；按任务类型路由（planning/coding/summarization，§11.3——当前只有默认 Provider）。
+- [x] **按任务类型路由（§11.3，2026-09-05 补齐）**：`[routes.*]` 配置 + TaskKind + `session.message` 的 `task_type` 参数；未配置/未注册回退默认 Provider。
+- [ ] **（阶段 1 遗留，非阻塞）**：Named Pipe IPC 后补 `windows-latest` CI matrix（§18.8）。
 
 ## 阶段 2：安全 Tool 闭环（下一个大块）
 

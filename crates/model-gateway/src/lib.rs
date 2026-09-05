@@ -5,8 +5,12 @@
 //! - Fallback 不得静默跨越隐私级别或成本上限；
 //! - Provider 不能读取其他 Provider 的密钥；
 //! - API Key 只存系统 Keychain（见 `codedock-secret-store`）。
-//!
-//! TODO(阶段1)：OpenAI-Compatible Provider 的真实 HTTP 实现。
+
+pub mod mock;
+pub mod openai;
+
+pub use mock::MockProvider;
+pub use openai::{OpenAICompatibleProvider, OpenAIProviderConfig};
 
 use async_trait::async_trait;
 use codedock_protocol::{Classification, ContextSnapshot};
@@ -78,7 +82,7 @@ pub enum ChatDelta {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum ModelGatewayError {
     #[error("provider {0}: {1}")]
     Provider(String, String),

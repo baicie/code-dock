@@ -11,9 +11,14 @@
 //!
 //! TODO(阶段3)：Selection Report、Token Budget 分配、变换管线（redact 等）。
 
+pub mod secrets;
+
+pub use secrets::SecretScanner;
+
 use async_trait::async_trait;
 use codedock_protocol::{
-    Classification, ContextBudget, ContextItem, ContextSnapshot, ModelRef, SelectionReason, Trust,
+    Classification, ContextBudget, ContextItem, ContextItemContent, ContextSnapshot, ModelRef,
+    SelectionReason, TransformationKind, Trust,
 };
 use thiserror::Error;
 
@@ -32,10 +37,14 @@ pub struct Candidate {
     pub score: f32,
 }
 
-/// 候选选择报告（§8.4.9）：记录为什么选中、为什么排除。
+/// 候选选择报告（§8.4.9）：记录为什么选中、为什么排除，
+/// 以及 Token 预算的全貌（§12.3：系统提示、任务、历史、工具输出都在预算内）。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SelectionReport {
     pub considered: Vec<ConsideredItem>,
+    pub max_input_tokens: u64,
+    pub reserved_output_tokens: u64,
+    pub used_input_tokens: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -91,10 +100,22 @@ impl SnapshotBuilder {
         });
 
         let mut snapshot = ContextSnapshot::new(session_id, self.model.clone(), self.budget);
-        let mut report = SelectionReport::default();
+        let mut report = SelectionReport {
+            max_input_tokens: self.budget.available_input_tokens,
+            reserved_output_tokens: self.budget.reserved_output_tokens,
+            ..SelectionReport::default()
+        };
         let mut used = 0u64;
 
-        for cand in candidates {
+        for mut cand in candidates {
+            // §18.5 统一脱敏管线：内容级 secret 检测先于预算装箱。
+            if let ContextItemContent::Inline { text } = &mut cand.item.content {
+                let outcome = SecretScanner.scan(text);
+                if outcome.redacted {
+                    cand.item.transformations.push(TransformationKind::Redact);
+                    *text = outcome.text;
+                }
+            }
             if cand.item.classification == Classification::Secret {
                 report.considered.push(ConsideredItem {
                     title: cand.item.title,
@@ -127,6 +148,7 @@ impl SnapshotBuilder {
         }
 
         snapshot.budget.used_input_tokens = used;
+        report.used_input_tokens = used;
         Ok((snapshot, report))
     }
 }

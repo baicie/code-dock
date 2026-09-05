@@ -46,6 +46,7 @@ use codedock_tool_runtime::{ToolOutputChunk, ToolRegistry, ToolRuntimeError};
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -81,6 +82,8 @@ pub enum TurnError {
     Tool(String),
     #[error("checkpoint 操作失败: {0}")]
     Checkpoint(String),
+    #[error("上下文组装失败: {0}")]
+    Context(String),
     #[error("事件存储失败: {0}")]
     EventStore(String),
 }
@@ -583,7 +586,7 @@ impl TurnEngine {
             let session_mode = info.mode;
             let task = info.task;
 
-            let snapshot = self
+            let (snapshot, selection_report) = self
                 .assemble_snapshot(
                     &provider,
                     session_id,
@@ -598,7 +601,11 @@ impl TurnEngine {
                 turn_id,
                 "context.snapshot.created",
                 Durability::Durable,
-                json!({ "snapshot_id": snapshot.snapshot_id, "snapshot": &snapshot }),
+                json!({
+                    "snapshot_id": snapshot.snapshot_id,
+                    "snapshot": &snapshot,
+                    "selection_report": &selection_report,
+                }),
             )
             .await?;
             self.append(
@@ -1282,7 +1289,7 @@ impl TurnEngine {
         session_id: SessionId,
         task: Option<&str>,
         model_override: Option<&str>,
-    ) -> Result<ContextSnapshot, TurnError> {
+    ) -> Result<(ContextSnapshot, codedock_context_engine::SelectionReport), TurnError> {
         let models = provider
             .list_models()
             .await
@@ -1320,9 +1327,9 @@ impl TurnEngine {
             .await
             .map_err(|e| TurnError::EventStore(e.to_string()))?;
 
-        let mut items = Vec::new();
-        items.push(
-            self.item(
+        let mut candidates = Vec::new();
+        candidates.push(
+            self.candidate(
                 "system_prompt",
                 Role::Instruction,
                 SelectionReason::ProjectRule,
@@ -1335,8 +1342,8 @@ impl TurnEngine {
             .await?,
         );
         if let Some(task) = task.filter(|t| !t.trim().is_empty()) {
-            items.push(
-                self.item(
+            candidates.push(
+                self.candidate(
                     "task",
                     Role::Instruction,
                     SelectionReason::UserAttached,
@@ -1356,12 +1363,12 @@ impl TurnEngine {
                 "message.created" => {
                     if event.payload.get("role").and_then(Value::as_str) == Some("user") {
                         if let Some(text) = event.payload.get("text").and_then(Value::as_str) {
-                            items.push(
-                                self.item(
+                            candidates.push(
+                                self.candidate(
                                     "user_message",
                                     Role::Instruction,
                                     SelectionReason::UserAttached,
-                                    100,
+                                    60,
                                     SourceKind::Message,
                                     session_uri.clone(),
                                     text.to_string(),
@@ -1382,8 +1389,8 @@ impl TurnEngine {
                             .is_empty()
                     {
                         let text = event.payload["text"].as_str().unwrap_or_default();
-                        items.push(
-                            self.item(
+                        candidates.push(
+                            self.candidate(
                                 "assistant_message",
                                 Role::AssistantHistory,
                                 SelectionReason::SessionMemory,
@@ -1402,8 +1409,8 @@ impl TurnEngine {
                     let args = event.payload.get("arguments").cloned().unwrap_or(json!({}));
                     let text =
                         json!({ "tool_proposal": { "name": name, "arguments": args } }).to_string();
-                    items.push(
-                        self.item(
+                    candidates.push(
+                        self.candidate(
                             "tool_proposal",
                             Role::AssistantHistory,
                             SelectionReason::AgentSelected,
@@ -1422,8 +1429,8 @@ impl TurnEngine {
                         .get("text")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    items.push(
-                        self.item(
+                    candidates.push(
+                        self.candidate(
                             "tool_result",
                             Role::Data,
                             SelectionReason::ToolResult,
@@ -1442,8 +1449,8 @@ impl TurnEngine {
                         .get("reason")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    items.push(
-                        self.item(
+                    candidates.push(
+                        self.candidate(
                             "tool_result",
                             Role::Data,
                             SelectionReason::ToolResult,
@@ -1462,8 +1469,8 @@ impl TurnEngine {
                         .get("error")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    items.push(
-                        self.item(
+                    candidates.push(
+                        self.candidate(
                             "tool_result",
                             Role::Data,
                             SelectionReason::ToolResult,
@@ -1480,19 +1487,40 @@ impl TurnEngine {
             }
         }
 
-        let mut snapshot = ContextSnapshot::new(
-            session_id,
-            model_ref,
-            ContextBudget::new(model.context_window, model.max_output),
-        );
-        snapshot.items = items;
-        snapshot.budget.used_input_tokens = snapshot.items.iter().map(|i| i.tokens).sum();
-        Ok(snapshot)
+        // §8.4.9/§12.3：预算装箱 + 选择报告。score = priority/100；
+        // 同分保持事件时序（稳定排序），装箱后按原始顺序还原会话结构。
+        let original_order: std::collections::HashMap<codedock_protocol::EventId, usize> =
+            candidates
+                .iter()
+                .enumerate()
+                .map(|(idx, c)| (c.item.item_id, idx))
+                .collect();
+        let budget = ContextBudget::new(model.context_window, model.max_output);
+        let builder = codedock_context_engine::SnapshotBuilder::new(model_ref.clone(), budget);
+        let (mut snapshot, report) = builder
+            .build(session_id, candidates)
+            .map_err(|e| TurnError::Context(e.to_string()))?;
+        snapshot.items.sort_by_key(|i| {
+            original_order
+                .get(&i.item_id)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+
+        // §8.4.1：记录最终发送给 Provider 的请求体哈希。
+        if let Some(payload) = provider.audit_payload(&snapshot).await {
+            if let Ok(encoded) = serde_json::to_string(&payload) {
+                let digest = sha2::Sha256::digest(encoded.as_bytes());
+                snapshot.final_request_sha256 = Some(format!("sha256:{}", hex::encode(digest)));
+            }
+        }
+
+        Ok((snapshot, report))
     }
 
-    /// 构造一个 Snapshot 条目并估算 Token（§8.4.3）。
+    /// 构造候选条目并估算 Token（§8.4.3）；score 供预算装箱排序。
     #[allow(clippy::too_many_arguments)]
-    async fn item(
+    async fn candidate(
         &self,
         kind: &str,
         role: Role,
@@ -1502,37 +1530,41 @@ impl TurnEngine {
         uri: String,
         text: String,
         provider: &Arc<dyn ModelProvider>,
-    ) -> Result<ContextItem, TurnError> {
+    ) -> Result<codedock_context_engine::Candidate, TurnError> {
         let tokens = provider.count_tokens(&text).await.unwrap_or_default();
-        Ok(ContextItem {
-            item_id: codedock_protocol::EventId::generate(),
-            kind: kind.into(),
-            role,
-            source: SourceRef {
-                kind: source_kind,
-                uri,
-                revision: None,
+        Ok(codedock_context_engine::Candidate {
+            score: priority as f32 / 100.0,
+            item: ContextItem {
+                item_id: codedock_protocol::EventId::generate(),
+                kind: kind.into(),
+                role,
+                source: SourceRef {
+                    kind: source_kind,
+                    uri,
+                    revision: None,
+                },
+                title: kind.into(),
+                content: ContextItemContent::Inline { text },
+                range: None,
+                selection: Selection {
+                    reason,
+                    selected_by: "context_engine".into(),
+                    score: 1.0,
+                    priority,
+                },
+                trust: if role == Role::Data {
+                    Trust::WorkspaceUntrusted
+                } else {
+                    Trust::Trusted
+                },
+                classification: Classification::Internal,
+                tokens,
+                transformations: Vec::new(),
             },
-            title: kind.into(),
-            content: ContextItemContent::Inline { text },
-            range: None,
-            selection: Selection {
-                reason,
-                selected_by: "turn_engine".into(),
-                score: 1.0,
-                priority,
-            },
-            trust: if role == Role::Data {
-                Trust::WorkspaceUntrusted
-            } else {
-                Trust::Trusted
-            },
-            classification: Classification::Internal,
-            tokens,
-            transformations: Vec::new(),
         })
     }
 
+    /// 构造一个 Snapshot 条目
     /// 追加一条事件；sequence 由 Event Store 分配（§8.2.3）。
     async fn append(
         &self,
@@ -2484,6 +2516,102 @@ mod tests {
             })
             .collect();
         assert_eq!(providers, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn secrets_are_redacted_and_snapshot_records_audit_hash() {
+        // §18.5 / §8.4.1 / §8.4.9 端到端：
+        // 工作区文件里的 API Key 进上下文前必须脱敏；
+        // 快照事件携带 selection_report 与 final_request_sha256。
+        let ws = std::env::temp_dir().join(format!(
+            "codedock-turn-secret-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        tokio::fs::create_dir_all(&ws).await.unwrap();
+        tokio::fs::write(ws.join("config.txt"), "api_key=sk-abcdefgh123456789012345")
+            .await
+            .unwrap();
+
+        let provider = Arc::new(MockProvider::new("mock", "mock-model"));
+        provider.push_script(vec![ChatDelta::ToolProposal {
+            name: "file.read".into(),
+            arguments: json!({ "path": "config.txt" }),
+        }]);
+        provider.push_script(vec![ChatDelta::Text("密钥已被脱敏处理。".into())]);
+
+        let (sessions, engine) = engine_with(
+            provider,
+            registry_with_file_read(&ws),
+            SessionBudgetLimits::default(),
+        )
+        .await;
+        let info = sessions
+            .create(codedock_protocol::SessionMode::Ask, None, None)
+            .await
+            .unwrap();
+
+        let out = engine
+            .send_message(info.session_id, "读取 config.txt", None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, TurnStatus::Completed);
+
+        let events = engine
+            .store
+            .load(info.session_id, 0, EVENT_SCAN_LIMIT, true)
+            .await
+            .unwrap();
+        let snapshot_event = events
+            .iter()
+            .rev()
+            .find(|e| e.event_type == "context.snapshot.created")
+            .expect("第二次模型调用应有快照");
+        // §8.4.9 选择报告落事件
+        assert!(snapshot_event.payload.get("selection_report").is_some());
+        let report = &snapshot_event.payload["selection_report"];
+        assert!(report["max_input_tokens"].is_u64());
+        assert!(report["used_input_tokens"].as_u64().unwrap() > 0);
+
+        // §8.4.1 final_request_sha256（MockProvider 提供 audit_payload）
+        let snapshot: ContextSnapshot =
+            serde_json::from_value(snapshot_event.payload["snapshot"].clone()).unwrap();
+        let hash = snapshot.final_request_sha256.expect("audit hash 应存在");
+        assert!(hash.starts_with("sha256:"));
+
+        // §18.5 脱敏：工具结果文本中的密钥被替换，且记录 Redact 变换
+        let tool_results: Vec<&ContextItem> = snapshot
+            .items
+            .iter()
+            .filter(|i| i.kind == "tool_result")
+            .collect();
+        assert_eq!(tool_results.len(), 1);
+        let text = match &tool_results[0].content {
+            ContextItemContent::Inline { text } => text.clone(),
+            _ => panic!(),
+        };
+        assert!(text.contains("[REDACTED:openai_key]"), "{text}");
+        assert!(!text.contains("sk-abcdefgh"));
+        assert!(
+            tool_results[0]
+                .transformations
+                .contains(&codedock_protocol::TransformationKind::Redact)
+        );
+
+        // 选择报告可见：system/task/user 等条目记录了入选原因
+        let considered = report["considered"].as_array().unwrap();
+        assert!(
+            considered.len() >= 4,
+            "system+user+proposal+result 至少 4 条: {}",
+            considered.len()
+        );
+        assert!(
+            considered
+                .iter()
+                .all(|c| c["selected"].is_boolean() && c["reason"].is_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[tokio::test]

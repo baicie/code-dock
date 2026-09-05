@@ -258,6 +258,20 @@ impl ModelProvider for OpenAICompatibleProvider {
     async fn health_check(&self) -> Result<(), ModelGatewayError> {
         self.api_key().await.map(|_| ())
     }
+
+    async fn audit_payload(&self, snapshot: &ContextSnapshot) -> Option<serde_json::Value> {
+        // §8.4.1：与 stream_chat 完全一致的请求体视图。
+        let messages: Vec<Value> = snapshot_to_messages(snapshot)
+            .into_iter()
+            .map(|(role, content)| json!({ "role": role, "content": content }))
+            .collect();
+        Some(json!({
+            "model": self.config.model,
+            "messages": messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        }))
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

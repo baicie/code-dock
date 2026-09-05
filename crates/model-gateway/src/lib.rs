@@ -57,6 +57,14 @@ pub trait ModelProvider: Send + Sync {
     /// 取消进行中的请求。
     async fn cancel_request(&self, request_id: &str) -> Result<(), ModelGatewayError>;
 
+    /// 审计载荷（§8.4.1）：返回将要发送给 Provider 的最终请求体，
+    /// Runtime 对其哈希后写入 `snapshot.final_request_sha256`；
+    /// None 表示 Provider 未提供审计视图。
+    async fn audit_payload(&self, snapshot: &ContextSnapshot) -> Option<serde_json::Value> {
+        let _ = snapshot;
+        None
+    }
+
     /// 健康检查。
     async fn health_check(&self) -> Result<(), ModelGatewayError>;
 }

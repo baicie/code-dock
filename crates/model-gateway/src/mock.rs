@@ -102,6 +102,15 @@ impl ModelProvider for MockProvider {
     async fn health_check(&self) -> Result<(), ModelGatewayError> {
         Ok(())
     }
+
+    async fn audit_payload(&self, snapshot: &ContextSnapshot) -> Option<serde_json::Value> {
+        // Mock 的"请求体"：回声目标 + 条目数（供审计机制测试）。
+        Some(serde_json::json!({
+            "provider": "mock",
+            "model": self.model,
+            "items": snapshot.items.len(),
+        }))
+    }
 }
 
 /// 粗略 Token 估算（§18.6：Provider 差异大，估算即可）。

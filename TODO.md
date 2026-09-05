@@ -67,7 +67,7 @@
   - [ ] ripgrep 二进制 / SQLite FTS5 替换纯 Rust 文本搜索（性能瓶颈出现时，§12.1 #3）
   - [ ] 文件监听增量更新（notify）与索引持久化（§12.2）
   - [ ] Git/Diagnostics 检索来源作为 Retriever（§12.1 #5/#6）
-  - [ ] Trust/Role 溯源管线细化（§18.1：按内容来源放宽副作用工具的保守审批）
+  - [x] Trust/Role 溯源（§18.1 + §8.3.7 完整语义）：副作用工具按上下文溯源——干净上下文按 §8.3.7 默认策略（Edit/Auto 自动放行 Medium），上下文含 Data 条目时提升一级审批；Ask/Plan 一律拒绝副作用操作
   - [ ] Visual Replay 事件回放视图（阶段 4 UI 的前置）
 - [ ] **阶段 4** Desktop DevTools Alpha：Tauri 2 + React，Console/Context/Tools/Network/Changes/Trace/Security 面板（§14），Monaco + xterm.js。
 - [ ] **阶段 5** Plugin System v1：Wasmtime + WIT、`.cdplugin`、Rust/TS SDK、Native Sidecar Supervisor（§10）。

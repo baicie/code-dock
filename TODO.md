@@ -31,16 +31,25 @@
 - [ ] `shell.execute`（超时 / 环境白名单 / 输出上限，§13.2）
 - [ ] `git.status`、`git.diff`
 
-**基础设施**：
+**基础设施**（2026-09-05 完成）：
 
-- [ ] Tool Definition 注册与参数校验（`namespace.action` 命名，§8.3.2/8.3.3）
-- [ ] Tool Preflight：ToolExecutionPlan + `operation_digest`（§8.3.5）
-- [ ] Policy Engine 决策接入：allow / deny / require_approval（§8.3.7 默认风险策略；policy-engine 已有雏形）
-- [ ] Approval 流程：审批锚定 digest、参数变化即失效、Agent 不得自批（§9.1）
+- [x] Tool Definition 注册与参数校验（`namespace.action` 命名，§8.3.2/8.3.3；最小 JSON Schema 子集校验器）
+- [x] Tool Preflight：ToolExecutionPlan + `operation_digest`（§8.3.5）
+- [x] Policy Engine 决策接入：allow / deny / require_approval（§8.3.7 默认风险策略；副作用工具按 §18.1 提升审批等级）
+- [x] Approval 流程：审批锚定 digest、一次性、5 分钟过期；`tool.approve` RPC 裁决；会话进入 waiting_approval；未决审批跨重启恢复（§9.1）
+- [x] 事件接入：`tool.call.*`、`policy.decision_made` 全链路落 Event Store
+- [x] **Agent 循环（§7）**：一次 Turn 内 模型 → Proposal → Preflight → Policy → 执行 → 结果回填上下文 → 继续调用，直至最终回复
+- [x] `file.read`（工作区 confinement：`~` 拒绝 / `..` 逃逸 / 符号链接逃逸三层防护 + 执行前二次 resolve + 64KiB 上限；§24 负向测试 1 的 Preflight 拦截已锁定）
+
+**待做**：
+
+- [ ] `file.patch`（Patch-first、源文件 Hash 校验、原子替换，§13.1）
+- [ ] `search.text`
+- [ ] `shell.execute`（超时 / 环境白名单 / 输出上限，§13.2）
+- [ ] `git.status`、`git.diff`
 - [ ] Checkpoint 创建与恢复（§3.5）
 - [ ] Hash 冲突检测：外部修改 → `change.conflicted`，禁止覆盖（§18.2）
-- [ ] Tool 取消与进程树管理：优雅终止 → Grace Period → 强杀（§8.3.10）
-- [ ] 事件接入：`tool.call.*`、`change.*`、`checkpoint.*` 全链路落 Event Store
+- [ ] Tool 取消与进程树管理：优雅终止 → Grace Period → 强杀（§8.3.10；CancellationToken 已贯通，真正取消随 shell 工具做）
 
 **退出标准**：CLI 完成"读代码 → 修改 → 运行测试 → 回滚"；所有副作用有权限、审批、审计记录。
 
@@ -55,11 +64,14 @@
 
 ## 已知技术债（不阻塞，登记备查）
 
+- [ ] 一次模型调用仅处理第一个 Tool Proposal，其余丢弃并告警（多提案并行是后续优化）。
+- [ ] 工具结果以文本协议回填上下文；OpenAI 原生 tool-calling 消息格式（`tool` role / `tool_calls`）待 model-gateway 实现。
 - [ ] `OpenAICompatibleProvider::cancel_request` 未实现请求粒度取消，随 Turn 取消一起做（§8.3.10）。
-- [ ] Blob 内容条目不发送给 Provider（阶段 1 仅内联文本，见 `snapshot_to_messages`）。
+- [ ] Blob 内容条目不发送给 Provider（仅内联文本，见 `snapshot_to_messages`）；大工具输出落 Blob 待 artifact-store 接入。
 - [ ] `count_tokens` 为估算值（chars/4），接入真实 tokenizer 待定（§18.6）。
-- [ ] Tool Calling / StructuredOutput Capability 已声明但未实现（模型产出 Tool Proposal 是阶段 2 事项）。
-- [ ] TurnEngine 暂停语义为"轮间暂停"：Turn 进行中的 Pause 不打断当轮，仅拒绝后续消息；Turn 中断/恢复需要取消令牌（§8.2.7 完整状态机在阶段 2 补齐）。
+- [ ] Tool Calling / StructuredOutput Capability 已声明但 Provider 侧未实现（当前由 Mock 脚本驱动提案）。
+- [ ] TurnEngine 暂停语义为"轮间暂停"：Turn 进行中的 Pause 不打断当轮，仅拒绝后续消息；Turn 中断/恢复需要取消令牌（§8.2.7 完整状态机）。
+- [ ] 审批的实时推送通知依赖 `session.subscribe`（当前客户端轮询 `session.events`）。
 
 ## MVP 验收（最终门槛，§24）
 

@@ -41,17 +41,18 @@
 - [x] **Agent 循环（§7）**：一次 Turn 内 模型 → Proposal → Preflight → Policy → 执行 → 结果回填上下文 → 继续调用，直至最终回复
 - [x] `file.read`（工作区 confinement：`~` 拒绝 / `..` 逃逸 / 符号链接逃逸三层防护 + 执行前二次 resolve + 64KiB 上限；§24 负向测试 1 的 Preflight 拦截已锁定）
 
-**待做**：
+**待做**（2026-09-05 工具集与安全基础设施补全后剩余）：
 
-- [ ] `file.patch`（Patch-first、源文件 Hash 校验、原子替换，§13.1）
-- [ ] `search.text`
-- [ ] `shell.execute`（超时 / 环境白名单 / 输出上限，§13.2）
-- [ ] `git.status`、`git.diff`
-- [ ] Checkpoint 创建与恢复（§3.5）
-- [ ] Hash 冲突检测：外部修改 → `change.conflicted`，禁止覆盖（§18.2）
-- [ ] Tool 取消与进程树管理：优雅终止 → Grace Period → 强杀（§8.3.10；CancellationToken 已贯通，真正取消随 shell 工具做）
+- [x] `file.patch`：find/replace 补丁、expected_sha256 冲突检测、原子替换、实际副作用记录
+- [x] `search.text`：纯 Rust 遍历（ripgrep/FTS5 阶段 3）
+- [x] `shell.execute`：参数化执行、环境白名单、Unix 进程组 TERM→KILL、超时/取消、捕获上限
+- [x] `git.status`、`git.diff`：固定 argv 只读执行
+- [x] Checkpoint：fs.write 工具执行前自动快照（DiskCheckpointStore，SHA 寻址）；`checkpoint.restore` RPC + CLI `rollback`（§3.5 / §24）
+- [x] Hash 冲突检测：Preflight 阶段即拒绝并发出 `change.conflicted`，冲突不打扰审批（§18.2）
+- [ ] 端到端验收：CLI 完成"读代码 → 修改 → 运行测试 → 回滚"全链路演练（需真实 Provider 提出多步工具提案，当前 Mock 只回声）
+- [ ] `git.status/diff` 工具执行前的工作区 git 仓库检测错误码对齐（§8.3.9 not_found）
 
-**退出标准**：CLI 完成"读代码 → 修改 → 运行测试 → 回滚"；所有副作用有权限、审批、审计记录。
+**退出标准**：CLI 完成"读代码 → 修改 → 运行测试 → 回滚"；所有副作用有权限、审批、审计记录。链路各环节（工具、审批、Checkpoint、冲突检测）已实现并测试，待真实模型端到端演练。
 
 ## 后续阶段（按路线图，勿提前）
 
@@ -64,6 +65,9 @@
 
 ## 已知技术债（不阻塞，登记备查）
 
+- [ ] 有副作用工具在默认语境下一律升级审批（§18.1 保守解释）；§8.3.7 的"Medium 在 Edit/Auto 自动允许"待阶段 3 Trust/Role 溯源管线后按内容来源放宽。
+- [ ] `search.text` 为朴素子串遍历；ripgrep + SQLite FTS5 + Tree-sitter 在阶段 3 替换（§12.1）。
+- [ ] shell.execute 的 Windows Job Object 管理待 Windows 适配（§18.8）。
 - [ ] 一次模型调用仅处理第一个 Tool Proposal，其余丢弃并告警（多提案并行是后续优化）。
 - [ ] 工具结果以文本协议回填上下文；OpenAI 原生 tool-calling 消息格式（`tool` role / `tool_calls`）待 model-gateway 实现。
 - [ ] `OpenAICompatibleProvider::cancel_request` 未实现请求粒度取消，随 Turn 取消一起做（§8.3.10）。

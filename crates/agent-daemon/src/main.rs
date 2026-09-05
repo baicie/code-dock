@@ -20,6 +20,10 @@ struct Args {
     #[arg(long, default_value = "/tmp/codedock.sock")]
     socket: String,
 
+    /// 工作区根目录（内置工具的文件访问边界，§13.1）。
+    #[arg(long, default_value = ".")]
+    workspace: String,
+
     /// Daemon 配置文件（模型 Provider 与预算上限，§11.2/§11.3/§18.3）。
     #[arg(long, default_value = "~/.codedock/config.toml")]
     config: String,
@@ -51,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     let data_dir = expand_tilde(&args.data_dir);
+    let workspace = expand_tilde(&args.workspace);
     let model_config = config::ModelLayerConfig::load(&expand_tilde(&args.config))?;
     let config = config::DaemonConfig {
         data_dir: data_dir.display().to_string(),
@@ -62,12 +67,14 @@ async fn main() -> anyhow::Result<()> {
     // ---- 模块装配（§5 架构）----
     // SQLite Event Store（WAL + 显式版本迁移 §18.9）→ 会话 Projection 重建（§17.1）
     // → 密钥注入 SecretStore → Provider 注册表 → Turn 引擎（含幂等缓存重建）。
-    // TODO(阶段1)：磁盘 Blob Store；TODO(阶段1/2)：tool-runtime / plugin-host 装配。
-    let runtime = assemble_sqlite(&data_dir, &config.model).await?;
+    // TODO(阶段1)：磁盘 Blob Store；TODO(阶段2+)：plugin-host 装配。
+    let runtime = assemble_sqlite(&data_dir, &config.model, &workspace).await?;
     tracing::info!(
         default_provider = %config.model.default_provider,
         providers = ?config.model.providers.keys().collect::<Vec<_>>(),
-        "模块装配完成: sqlite_event_store / session_manager / turn_engine / secret_store / provider_registry"
+        tools = "file.read",
+        workspace = %workspace.display(),
+        "模块装配完成: sqlite_event_store / session_manager / turn_engine / tool_registry / policy_engine / secret_store / provider_registry"
     );
 
     // ---- Local IPC：Unix Domain Socket（§2）----

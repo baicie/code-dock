@@ -35,6 +35,14 @@ enum Commands {
     Status { session_id: String },
     /// 发送一条用户消息并等待本轮对话完成（同步返回助手最终回复）。
     Message { session_id: String, text: String },
+    /// 裁决等待中的工具审批（§9.1：approve_once / deny）。
+    Approve {
+        session_id: String,
+        tool_call_id: String,
+        /// approve_once | deny
+        #[arg(long)]
+        response: String,
+    },
     /// 暂停会话。
     Pause { session_id: String },
     /// 恢复会话。
@@ -78,6 +86,19 @@ async fn main() -> anyhow::Result<()> {
             "session.message",
             json!({ "session_id": session_id, "text": text, "idempotency_key": new_key() }),
         ),
+        Commands::Approve {
+            session_id,
+            tool_call_id,
+            response,
+        } => (
+            "tool.approve",
+            json!({
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
+                "response": response,
+                "idempotency_key": new_key()
+            }),
+        ),
         Commands::Pause { session_id } => (
             "session.pause",
             json!({ "session_id": session_id, "idempotency_key": new_key() }),
@@ -119,13 +140,26 @@ async fn main() -> anyhow::Result<()> {
             if let Some(text) = result["text"].as_str() {
                 println!("{text}");
             }
-            println!(
-                "--- turn {} | tokens in {} / out {} | seq {}",
-                result["turn_id"].as_str().unwrap_or("?"),
-                result["input_tokens"],
-                result["output_tokens"],
-                result["latest_sequence"],
-            );
+            let status = result["status"].as_str().unwrap_or("completed");
+            match status {
+                "waiting_approval" => {
+                    if let Some(id) = result["pending_tool_call_id"].as_str() {
+                        println!(
+                            "⏸ 等待审批: tool_call_id={id}\n  批准: codedock approve {sid} {id} --response approve_once\n  拒绝: codedock approve {sid} {id} --response deny",
+                            sid = result["session_id"].as_str().unwrap_or("?"),
+                        );
+                    } else {
+                        println!("⏸ 等待审批（用 `codedock events` 查看 tool_call_id）");
+                    }
+                }
+                _ => println!(
+                    "--- turn {} | tokens in {} / out {} | seq {}",
+                    result["turn_id"].as_str().unwrap_or("?"),
+                    result["input_tokens"],
+                    result["output_tokens"],
+                    result["latest_sequence"],
+                ),
+            }
         }
         "session.events" => {
             let empty: Vec<Value> = Vec::new();

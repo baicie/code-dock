@@ -101,6 +101,9 @@ impl EventSourcedSessionManager {
                     "session.started" => apply_status(&mut record, SessionStatus::Running),
                     "session.paused" => apply_status(&mut record, SessionStatus::Paused),
                     "session.resumed" => apply_status(&mut record, SessionStatus::Running),
+                    "session.waiting_approval" => {
+                        apply_status(&mut record, SessionStatus::WaitingApproval)
+                    }
                     "session.cancelled" => apply_status(&mut record, SessionStatus::Cancelled),
                     "session.mode_changed" => {
                         if let Some(rec) = record.as_mut() {
@@ -351,6 +354,52 @@ impl SessionManager for EventSourcedSessionManager {
             .load(id, after_sequence, limit, durable_only)
             .await
             .map_err(|e| SessionError::EventStore(e.to_string()))
+    }
+
+    async fn enter_waiting_approval(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("wait_approval:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+        let mut rec = self.record_of(id)?;
+        let from = rec.status;
+        rec.transition(SessionStatus::WaitingApproval)?;
+        self.append(
+            id,
+            "session.waiting_approval",
+            json!({ "from": from, "to": rec.status }),
+        )
+        .await?;
+        self.remember(rec.clone());
+        self.remember_done(&dk, id);
+        self.info(&rec).await
+    }
+
+    async fn exit_waiting_approval(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let dk = idempotency_key.map(|k| format!("exit_approval:{k}"));
+        if let Some(info) = self.replay_done(&dk).await? {
+            return Ok(info);
+        }
+        let mut rec = self.record_of(id)?;
+        let from = rec.status;
+        rec.transition(SessionStatus::Running)?;
+        self.append(
+            id,
+            "session.resumed",
+            json!({ "from": from, "to": rec.status, "reason": "approval_resolved" }),
+        )
+        .await?;
+        self.remember(rec.clone());
+        self.remember_done(&dk, id);
+        self.info(&rec).await
     }
 }
 

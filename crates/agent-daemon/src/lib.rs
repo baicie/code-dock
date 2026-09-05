@@ -98,24 +98,47 @@ pub async fn load_env_secrets(model: &ModelLayerConfig, secrets: &Arc<dyn Secret
 pub async fn assemble_in_memory() -> Arc<Runtime> {
     let event_store: Arc<dyn codedock_event_store::EventStore> =
         Arc::new(InMemoryEventStore::new());
-    Arc::new(assemble_runtime(event_store, &ModelLayerConfig::default()).await)
+    Arc::new(
+        assemble_runtime(
+            event_store,
+            &ModelLayerConfig::default(),
+            &std::env::temp_dir(),
+        )
+        .await,
+    )
 }
 
 /// 生产装配：SQLite Event Store（WAL + 显式版本迁移，§18.9），
-/// 从磁盘事件流重建会话 Projection、幂等缓存（§17.1），并装配模型层。
-pub async fn assemble_sqlite(data_dir: &Path, model: &ModelLayerConfig) -> anyhow::Result<Runtime> {
+/// 从磁盘事件流重建会话 Projection、幂等缓存（§17.1），并装配模型层与工具层。
+pub async fn assemble_sqlite(
+    data_dir: &Path,
+    model: &ModelLayerConfig,
+    workspace: &Path,
+) -> anyhow::Result<Runtime> {
     let event_store: Arc<dyn codedock_event_store::EventStore> = Arc::new(
         SqliteEventStore::open(data_dir.join("events.db"))
             .await
             .context("打开 SQLite Event Store 失败")?,
     );
-    Ok(assemble_runtime(event_store, model).await)
+    Ok(assemble_runtime(event_store, model, workspace).await)
 }
 
-/// 公共装配路径：Event Store → 会话管理 → 密钥/Provider 注册表 → Turn 引擎。
+/// 内置工具装配（阶段 2 逐个补充：file.patch / search.text / shell.execute / git.*）。
+fn build_tools(workspace: &Path) -> codedock_tool_runtime::ToolRegistry {
+    let mut tools = codedock_tool_runtime::ToolRegistry::new();
+    tools
+        .register(Box::new(codedock_tool_runtime::FileReadTool::new(
+            workspace,
+        )))
+        .expect("注册 file.read 失败");
+    tools
+}
+
+/// 公共装配路径：Event Store → 会话管理 → 密钥/Provider/工具 → Policy → Turn 引擎。
 async fn assemble_runtime(
     event_store: Arc<dyn codedock_event_store::EventStore>,
     model: &ModelLayerConfig,
+    workspace: &Path,
 ) -> Runtime {
     let sessions: Arc<dyn SessionManager> = Arc::new(
         EventSourcedSessionManager::restore(event_store.clone())
@@ -126,12 +149,17 @@ async fn assemble_runtime(
     let secrets: Arc<dyn SecretStore> = Arc::new(codedock_secret_store::InMemorySecretStore::new());
     load_env_secrets(model, &secrets).await;
     let registry = build_registry(model, &secrets).expect("装配 Provider 注册表失败");
+    let tools = Arc::new(build_tools(workspace));
+    let policy: Arc<dyn codedock_policy_engine::PolicyEngine> =
+        Arc::new(codedock_policy_engine::DefaultPolicyEngine);
 
     let turns = Arc::new(
         TurnEngine::restore(
             event_store,
             sessions.clone(),
             Arc::new(registry),
+            tools,
+            policy,
             model.limits,
         )
         .await
@@ -207,7 +235,7 @@ mod tests {
 
         let session_id;
         {
-            let runtime = assemble_sqlite(&dir, &model).await.unwrap();
+            let runtime = assemble_sqlite(&dir, &model, &dir).await.unwrap();
             let info = runtime
                 .sessions
                 .create(
@@ -222,7 +250,7 @@ mod tests {
         }
         // 模拟重启：重新装配，状态与幂等缓存都应恢复。
         {
-            let runtime = assemble_sqlite(&dir, &model).await.unwrap();
+            let runtime = assemble_sqlite(&dir, &model, &dir).await.unwrap();
             let info = runtime.sessions.status(session_id).await.unwrap();
             assert_eq!(info.status, SessionStatus::Paused);
 

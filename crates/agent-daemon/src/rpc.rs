@@ -79,6 +79,11 @@ struct Command {
     task: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default, rename = "tool_call_id")]
+    tool_call_id: Option<String>,
+    /// 审批响应：`approve_once` | `deny`（§9.1 allowed_responses）。
+    #[serde(default, rename = "response")]
+    response: Option<String>,
     #[serde(default, rename = "after_sequence")]
     after_sequence: Option<u64>,
     #[serde(default, rename = "durable_only")]
@@ -174,6 +179,28 @@ async fn run(runtime: &Runtime, method: &str, params: Value) -> Result<Value, Rp
             let id = cmd.require_session()?;
             let text = cmd.require_text()?;
             let outcome = runtime.turns.send_message(id, text, cmd.key()).await?;
+            Ok(serde_json::to_value(outcome)?)
+        }
+
+        "tool.approve" => {
+            let id = cmd.require_session()?;
+            let tool_call_id = cmd
+                .tool_call_id
+                .clone()
+                .ok_or_else(|| invalid("缺少 tool_call_id"))?;
+            let approve = match cmd.response.as_deref() {
+                Some("approve_once") => true,
+                Some("deny") => false,
+                other => {
+                    return Err(invalid(format!(
+                        "response 必须是 approve_once 或 deny（当前: {other:?}）"
+                    )));
+                }
+            };
+            let outcome = runtime
+                .turns
+                .resolve_approval(id, &tool_call_id, approve, cmd.key())
+                .await?;
             Ok(serde_json::to_value(outcome)?)
         }
 
@@ -317,6 +344,48 @@ mod tests {
         let err = resp.error.unwrap();
         assert_eq!(err.code, codes::CODEDOCK_ERROR);
         assert!(err.message.contains("Paused"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn tool_approve_validates_response_and_state() {
+        let runtime = assemble_in_memory().await;
+        let (sid, _) = create_session(&runtime, "ask").await;
+
+        // 非法 response → INVALID_PARAMS
+        let resp = dispatch(
+            &runtime,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: JsonRpcId::String("t-bad-resp".into()),
+                method: "tool.approve".into(),
+                params: Some(json!({
+                    "session_id": sid,
+                    "tool_call_id": "whatever",
+                    "response": "approve_forever",
+                })),
+            },
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, codes::INVALID_PARAMS);
+
+        // 没有 pending 审批（会话还在 Running）→ 状态错误
+        let resp = dispatch(
+            &runtime,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: JsonRpcId::String("t-no-pending".into()),
+                method: "tool.approve".into(),
+                params: Some(json!({
+                    "session_id": sid,
+                    "tool_call_id": "whatever",
+                    "response": "approve_once",
+                })),
+            },
+        )
+        .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, codes::CODEDOCK_ERROR);
+        assert!(err.message.contains("Running"), "{err:?}");
     }
 
     /// 断线重连（§8.2.5）：客户端以 `after_sequence` 重连后，Runtime 先补发

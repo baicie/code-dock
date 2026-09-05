@@ -6,6 +6,11 @@
 //! TODO(阶段2)：内置工具（file.read / file.patch / search.text / shell.execute /
 //! git.status / git.diff）实现、进程树管理与 Hash 冲突检测。
 
+pub mod builtin;
+pub mod validation;
+
+pub use builtin::FileReadTool;
+
 use async_trait::async_trait;
 use codedock_protocol::{ToolDefinition, ToolExecutionPlan, ToolResult};
 use sha2::{Digest, Sha256};

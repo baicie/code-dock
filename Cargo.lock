@@ -245,6 +245,7 @@ dependencies = [
  "codedock-protocol",
  "codedock-secret-store",
  "codedock-session-engine",
+ "codedock-tool-runtime",
  "serde",
  "serde_json",
  "tokio",
@@ -412,13 +413,16 @@ dependencies = [
  "chrono",
  "codedock-event-store",
  "codedock-model-gateway",
+ "codedock-policy-engine",
  "codedock-protocol",
+ "codedock-tool-runtime",
  "futures",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -435,6 +439,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

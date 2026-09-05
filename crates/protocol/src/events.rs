@@ -49,6 +49,8 @@ event_types! {
     SessionModeChanged => "session.mode_changed",
     SessionPaused => "session.paused",
     SessionResumed => "session.resumed",
+    // v1.0 补充事件类型：Tool 审批等待（§8.2.7 waiting_approval 状态）。
+    SessionWaitingApproval => "session.waiting_approval",
     SessionCompleted => "session.completed",
     SessionFailed => "session.failed",
     SessionCancelled => "session.cancelled",

@@ -145,6 +145,20 @@ pub trait SessionManager: Send + Sync {
         durable_only: bool,
         limit: usize,
     ) -> Result<Vec<codedock_protocol::EventEnvelope>, SessionError>;
+
+    /// 进入等待审批状态（running → waiting_approval，§8.2.7）。
+    async fn enter_waiting_approval(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError>;
+
+    /// 审批裁决后回到运行状态（waiting_approval → running）。
+    async fn exit_waiting_approval(
+        &self,
+        id: SessionId,
+        idempotency_key: Option<String>,
+    ) -> Result<SessionInfo, SessionError>;
 }
 
 #[cfg(test)]

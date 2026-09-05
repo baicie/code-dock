@@ -8,11 +8,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use codedock_event_store::EventStore;
-use codedock_protocol::{Actor, Durability, EventEnvelope, SessionId, SessionMode, SessionStatus};
+use codedock_protocol::{
+    Actor, Durability, EventEnvelope, SessionId, SessionMode, SessionStatus,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{SessionError, SessionManager, SessionRecord};
+
+/// 给 payload 附加命令键（携带幂等键时），用于重启后恢复幂等缓存（§8.2.6）。
+fn command_payload(mut payload: Value, dk: &Option<String>) -> Value {
+    if let Some(key) = dk {
+        payload["command_key"] = json!(key);
+    }
+    payload
+}
+
+/// 重建时应用状态迁移；非法迁移记录日志并保留当前状态（历史事件应总是合法）。
+fn apply_status(record: &mut Option<SessionRecord>, to: SessionStatus) {
+    if let Some(rec) = record.as_mut() {
+        if let Err(err) = rec.transition(to) {
+            tracing::debug!(session = %rec.session_id, ?to, ?err, "重建时忽略非法状态迁移");
+        }
+    }
+}
 
 /// 客户端可见的 Session 投影。
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -28,7 +47,7 @@ pub struct SessionInfo {
 /// 基于 Event Store 的 SessionManager。
 pub struct EventSourcedSessionManager {
     store: Arc<dyn EventStore>,
-    /// 状态 Projection（内存；TODO 阶段1：重启后从 Event Store 重建，§17.1）。
+    /// 状态 Projection（重启后由 [`EventSourcedSessionManager::restore`] 从事件流重建，§17.1）。
     sessions: Mutex<HashMap<SessionId, SessionRecord>>,
     /// 幂等缓存：`method:key` → 受影响 session。
     done: Mutex<HashMap<String, SessionId>>,
@@ -41,6 +60,78 @@ impl EventSourcedSessionManager {
             sessions: Mutex::new(HashMap::new()),
             done: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 从 Event Store 重建状态 Projection 与幂等缓存（§17.1：重启恢复）。
+    pub async fn restore(store: Arc<dyn EventStore>) -> Result<Self, SessionError> {
+        let sessions = store
+            .load_all_sessions()
+            .await
+            .map_err(|e| SessionError::EventStore(e.to_string()))?;
+        let mgr = Self::new(store);
+
+        for (session_id, events) in sessions {
+            let mut record: Option<SessionRecord> = None;
+            for event in events {
+                match event.event_type.as_str() {
+                    "session.created" => {
+                        let mode = event
+                            .payload
+                            .get("mode")
+                            .and_then(|v| serde_json::from_value::<SessionMode>(v.clone()).ok());
+                        let Some(mode) = mode else {
+                            tracing::warn!(
+                                %session_id,
+                                "session.created 缺少合法 mode，跳过该会话重建"
+                            );
+                            record = None;
+                            break;
+                        };
+                        record = Some(SessionRecord {
+                            session_id,
+                            mode,
+                            status: SessionStatus::Created,
+                            task: event
+                                .payload
+                                .get("task")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            plan: None,
+                            created_at: event.occurred_at,
+                        });
+                    }
+                    "session.started" => apply_status(&mut record, SessionStatus::Running),
+                    "session.paused" => apply_status(&mut record, SessionStatus::Paused),
+                    "session.resumed" => apply_status(&mut record, SessionStatus::Running),
+                    "session.cancelled" => apply_status(&mut record, SessionStatus::Cancelled),
+                    "session.mode_changed" => {
+                        if let Some(rec) = record.as_mut() {
+                            if let Some(mode) = event
+                                .payload
+                                .get("to")
+                                .and_then(|v| serde_json::from_value::<SessionMode>(v.clone()).ok())
+                            {
+                                rec.mode = mode;
+                            }
+                        }
+                    }
+                    // 未知事件类型不参与状态重建（§8.1：降级保留）。
+                    _ => {}
+                }
+
+                // 恢复幂等缓存：command_key 已含 method 前缀（如 "create:k1"）。
+                if let Some(key) = event.payload.get("command_key").and_then(Value::as_str) {
+                    mgr.done
+                        .lock()
+                        .expect("done map poisoned")
+                        .insert(key.to_string(), session_id);
+                }
+            }
+            if let Some(rec) = record {
+                mgr.remember(rec);
+            }
+        }
+        Ok(mgr)
     }
 
     async fn info(&self, rec: &SessionRecord) -> Result<SessionInfo, SessionError> {
@@ -137,9 +228,12 @@ impl SessionManager for EventSourcedSessionManager {
         self.append(
             rec.session_id,
             "session.created",
-            json!({
-                "mode": mode, "task": task, "status": "created"
-            }),
+            command_payload(
+                json!({
+                    "mode": mode, "task": task, "status": "created"
+                }),
+                &dk,
+            ),
         )
         .await?;
         self.append(rec.session_id, "session.started", json!({ "mode": mode }))
@@ -240,7 +334,7 @@ impl SessionManager for EventSourcedSessionManager {
         self.append(
             id,
             "session.mode_changed",
-            json!({ "from": from, "to": mode }),
+            command_payload(json!({ "from": from, "to": mode }), &dk),
         )
         .await?;
         self.remember(rec.clone());
@@ -362,5 +456,36 @@ mod tests {
 
         let err = mgr.status(SessionId::generate()).await.unwrap_err();
         assert!(matches!(err, SessionError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn projection_and_idempotency_survive_restart() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let mgr = EventSourcedSessionManager::new(store.clone());
+        let info = mgr
+            .create(SessionMode::Plan, Some("重构模块".into()), Some("k1".into()))
+            .await
+            .unwrap();
+        mgr.pause(info.session_id, Some("p1".to_string()))
+            .await
+            .unwrap();
+        mgr.set_mode(info.session_id, SessionMode::Edit, None)
+            .await
+            .unwrap();
+        drop(mgr);
+
+        let restored = EventSourcedSessionManager::restore(store).await.unwrap();
+        let after = restored.status(info.session_id).await.unwrap();
+        assert_eq!(after.status, SessionStatus::Paused);
+        assert_eq!(after.mode, SessionMode::Edit);
+        assert_eq!(after.task.as_deref(), Some("重构模块"));
+
+        // 幂等缓存跨重启恢复：重复 create 返回同一会话，不追加事件。
+        let again = restored
+            .create(SessionMode::Plan, Some("重构模块".into()), Some("k1".into()))
+            .await
+            .unwrap();
+        assert_eq!(again.session_id, info.session_id);
+        assert_eq!(again.latest_sequence, 4, "重启后重复命令不追加事件");
     }
 }

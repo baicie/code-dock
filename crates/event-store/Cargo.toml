@@ -10,8 +10,12 @@ authors.workspace = true
 [dependencies]
 codedock-protocol = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }

@@ -7,7 +7,7 @@
 
 use anyhow::Context as _;
 use clap::Parser;
-use codedock_agent_daemon::{assemble_in_memory, config, ipc};
+use codedock_agent_daemon::{assemble_sqlite, config, ipc};
 
 #[derive(Parser, Debug)]
 #[command(name = "codedock-daemon", version, about = "CodeDock Agent Runtime")]
@@ -21,6 +21,21 @@ struct Args {
     socket: String,
 }
 
+/// 展开 `~` 前缀为用户主目录（阶段 1 只处理 Unix 约定）。
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        return std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
+    }
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(rest))
+            .unwrap_or_else(|_| std::path::PathBuf::from(path)),
+        None => std::path::PathBuf::from(path),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 结构化日志：RUST_LOG=debug 调整级别
@@ -31,22 +46,24 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    let data_dir = expand_tilde(&args.data_dir);
     let config = config::DaemonConfig {
-        data_dir: args.data_dir.clone(),
+        data_dir: data_dir.display().to_string(),
         socket_path: args.socket.clone(),
     };
     tracing::info!(?config, "CodeDock daemon 正在启动");
 
     // ---- 模块装配（§5 架构）----
-    // TODO(阶段1)：内存实现 → SQLite Event Store + 磁盘 Blob Store + OS Keychain；
+    // SQLite Event Store（WAL + 显式版本迁移 §18.9）+ 事件流重建 Projection（§17.1）。
+    // TODO(阶段1)：磁盘 Blob Store + OS Keychain；
     // TODO(阶段1/2)：装配 model-gateway / tool-runtime / plugin-host。
-    let (_event_store, runtime) = assemble_in_memory();
+    let (_event_store, runtime) = assemble_sqlite(&data_dir).await?;
     let _blob_store = codedock_artifact_store::InMemoryBlobStore::new();
     let _secret_store = codedock_secret_store::InMemorySecretStore::new();
     let _policy = codedock_policy_engine::DefaultPolicyEngine;
 
     tracing::info!(
-        "模块装配完成: event_store / session_runtime / blob_store / secret_store / policy_engine"
+        "模块装配完成: sqlite_event_store / session_runtime / blob_store / secret_store / policy_engine"
     );
 
     // ---- Local IPC：Unix Domain Socket（§2）----

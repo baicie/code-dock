@@ -5,7 +5,11 @@
 //! - Durable Event 确认写入后不可修改，断线恢复时先补发 Durable Event（§8.2.5）；
 //! - 事件使用事务写入（§20.1）。
 //!
-//! TODO(阶段1)：SQLite 持久化实现（sqlx），本文件先提供内存实现与抽象。
+//! 持久化实现见 [`sqlite::SqliteEventStore`]（WAL + `schema_migrations` 显式版本迁移，§18.9）。
+
+pub mod sqlite;
+
+pub use sqlite::SqliteEventStore;
 
 use async_trait::async_trait;
 use codedock_protocol::{Durability, EventEnvelope, SessionId};
@@ -19,6 +23,12 @@ pub enum EventStoreError {
     SessionNotFound(SessionId),
     #[error("事件写入失败: {0}")]
     WriteFailed(String),
+    #[error("数据库操作失败: {0}")]
+    Db(String),
+    #[error("数据库连接失败: {0}")]
+    Connect(String),
+    #[error("数据库迁移失败 (v{version}): {message}")]
+    Migration { version: i64, message: String },
 }
 
 /// 事件存储抽象。
@@ -40,6 +50,13 @@ pub trait EventStore: Send + Sync {
 
     /// Session 当前最新 sequence；无事件返回 0。
     async fn latest_sequence(&self, session_id: SessionId) -> Result<u64, EventStoreError>;
+
+    /// 读取所有会话的事件流（按 session 分组、组内 sequence 升序）。
+    ///
+    /// 用于进程重启后重建状态 Projection 与幂等缓存（§17.1）。
+    async fn load_all_sessions(
+        &self,
+    ) -> Result<Vec<(SessionId, Vec<EventEnvelope>)>, EventStoreError>;
 }
 
 /// 内存实现（开发 / 测试用）。
@@ -103,6 +120,19 @@ impl EventStore for InMemoryEventStore {
             .get(&session_id)
             .map(|(next, _)| next - 1)
             .unwrap_or(0))
+    }
+
+    async fn load_all_sessions(
+        &self,
+    ) -> Result<Vec<(SessionId, Vec<EventEnvelope>)>, EventStoreError> {
+        let store = self.inner.lock().expect("event store poisoned");
+        let mut sessions: Vec<(SessionId, Vec<EventEnvelope>)> = store
+            .sessions
+            .iter()
+            .map(|(sid, (_, events))| (*sid, events.clone()))
+            .collect();
+        sessions.sort_by_key(|(sid, _)| *sid);
+        Ok(sessions)
     }
 }
 

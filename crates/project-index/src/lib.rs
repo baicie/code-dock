@@ -8,6 +8,12 @@
 //!
 //! TODO(阶段3)：ripgrep 文本搜索（`search.text`）与 Tree-sitter 符号索引（`search.symbol`）。
 
+pub mod symbols;
+pub mod text;
+
+pub use symbols::WorkspaceIndex;
+pub use text::search_text;
+
 use async_trait::async_trait;
 use codedock_protocol::SourceKind;
 use serde::{Deserialize, Serialize};

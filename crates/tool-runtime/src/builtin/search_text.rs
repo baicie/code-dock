@@ -1,10 +1,9 @@
-//! `search.text`：工作区文本搜索（§8.3.3 / §12.1）。
+//! `search.text`：工作区文本搜索（§8.3.3 / §12.1 #3）。
 //!
-//! 阶段 2 的纯 Rust 实现：目录遍历跳过 `.git`/`target`/`node_modules` 等构建目录，
-//! 跳过超大与非 UTF-8 文件，大小写不敏感子串匹配，命中数封顶防上下文爆炸。
-//! TODO(阶段3)：ripgrep + SQLite FTS5 + Tree-sitter 符号索引（§12.1）。
+//! 搜索实现由 [`codedock_project_index`] 提供（与 Context 检索共用一套
+//! 排除规则与命中结构）；ripgrep 二进制 / FTS5 在性能瓶颈出现时替换。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use codedock_protocol::{
@@ -20,8 +19,6 @@ use crate::{
 };
 
 const DEFAULT_MAX_MATCHES: usize = 100;
-const MAX_FILE_BYTES: u64 = 256 * 1024;
-const SKIP_DIRS: [&str; 5] = [".git", "target", "node_modules", "dist", ".codedock"];
 
 /// 工作区文本搜索工具。
 pub struct SearchTextTool {
@@ -29,77 +26,14 @@ pub struct SearchTextTool {
 }
 
 impl SearchTextTool {
-    pub fn new(root: impl AsRef<Path>) -> Self {
+    pub fn new(root: impl AsRef<std::path::Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
         }
     }
 }
 
-#[derive(Debug)]
-struct Match {
-    path: String,
-    line_no: usize,
-    line: String,
-}
-
-/// 同步遍历（在小中型工作区内足够快；ripgrep 在阶段 3 引入）。
-fn walk(
-    root: &Path,
-    dir: &Path,
-    query: &str,
-    max: usize,
-    out: &mut Vec<Match>,
-) -> std::io::Result<()> {
-    if out.len() >= max {
-        return Ok(());
-    }
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        if out.len() >= max {
-            return Ok(());
-        }
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
-                continue;
-            }
-            walk(root, &path, query, max, out)?;
-        } else if meta.is_file() && meta.len() <= MAX_FILE_BYTES {
-            let Ok(content) = std::fs::read(&path) else {
-                continue;
-            };
-            // 非 UTF-8（二进制）文件跳过。
-            let Ok(text) = String::from_utf8(content) else {
-                continue;
-            };
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
-            let q = query.to_lowercase();
-            for (idx, line) in text.lines().enumerate() {
-                if line.to_lowercase().contains(&q) {
-                    out.push(Match {
-                        path: rel.clone(),
-                        line_no: idx + 1,
-                        line: line.chars().take(200).collect(),
-                    });
-                    if out.len() >= max {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn format_matches(matches: &[Match], truncated: bool) -> String {
+fn format_matches(matches: &[codedock_project_index::TextMatch], truncated: bool) -> String {
     if matches.is_empty() {
         return "未找到匹配".to_string();
     }
@@ -110,7 +44,7 @@ fn format_matches(matches: &[Match], truncated: bool) -> String {
             current_file = m.path.clone();
             text.push_str(&format!("{current_file}\n"));
         }
-        text.push_str(&format!("  {}: {}\n", m.line_no, m.line));
+        text.push_str(&format!("  {}: {}\n", m.line, m.text));
     }
     if truncated {
         text.push_str(&format!("（结果截断，仅显示前 {} 条）\n", matches.len()));
@@ -204,24 +138,17 @@ impl ToolExecutor for SearchTextTool {
             .map(|n| n.min(1_000) as usize)
             .unwrap_or(DEFAULT_MAX_MATCHES);
 
-        let query_for_task = query.clone();
-        let root = self.root.to_path_buf();
+        let root = self.root.clone();
         // 遍历是 CPU/IO 混合的同步代码，放到阻塞线程避免卡住运行时。
         let walked = tokio::task::spawn_blocking(move || {
-            let mut matches = Vec::new();
-            let result = walk(&root, &root, &query_for_task, max, &mut matches);
-            (matches, result.err())
+            codedock_project_index::search_text(&root, &query, max)
         })
         .await
         .map_err(|e| ToolRuntimeError::ExecutionFailed(e.to_string()))?;
-        let (matches, walk_err) = walked;
-        if let Some(err) = walk_err {
-            return Err(ToolRuntimeError::ExecutionFailed(format!(
-                "遍历失败: {err}"
-            )));
-        }
-
+        let matches =
+            walked.map_err(|e| ToolRuntimeError::ExecutionFailed(format!("遍历失败: {e}")))?;
         let truncated = matches.len() >= max;
+
         let text = format_matches(&matches, truncated);
         let _ = output.send(ToolOutputChunk::Text(text.clone())).await;
 
@@ -268,14 +195,10 @@ mod tests {
         dir
     }
 
-    fn tool(dir: &PathBuf) -> SearchTextTool {
-        SearchTextTool::new(dir)
-    }
-
     #[tokio::test]
     async fn finds_matches_case_insensitive_and_skips_build_dirs() {
         let dir = workspace_dir().await;
-        let t = tool(&dir);
+        let t = SearchTextTool::new(&dir);
         let plan = t.preflight(json!({ "query": "TODO" })).await.unwrap();
         let (tx, _rx) = mpsc::channel(8);
         let result = t.execute(plan, tx, CancellationToken::new()).await.unwrap();
@@ -292,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn no_match_reports_cleanly_and_validates_args() {
         let dir = workspace_dir().await;
-        let t = tool(&dir);
+        let t = SearchTextTool::new(&dir);
         let plan = t
             .preflight(json!({ "query": "no-such-thing" }))
             .await

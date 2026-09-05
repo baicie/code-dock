@@ -9,7 +9,9 @@
 pub mod builtin;
 pub mod validation;
 
-pub use builtin::{FilePatchTool, FileReadTool, GitTool, SearchTextTool, ShellExecuteTool};
+pub use builtin::{
+    FilePatchTool, FileReadTool, GitTool, SearchSymbolTool, SearchTextTool, ShellExecuteTool,
+};
 
 use async_trait::async_trait;
 use codedock_protocol::{ToolDefinition, ToolExecutionPlan, ToolResult};

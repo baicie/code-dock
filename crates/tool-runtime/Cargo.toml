@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 codedock-protocol = { workspace = true }
+codedock-project-index = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

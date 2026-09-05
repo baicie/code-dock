@@ -3,6 +3,7 @@
 pub mod file_patch;
 pub mod file_read;
 pub mod git_tools;
+pub mod search_symbol;
 pub mod search_text;
 pub mod shell_exec;
 pub mod workspace;
@@ -10,5 +11,6 @@ pub mod workspace;
 pub use file_patch::FilePatchTool;
 pub use file_read::FileReadTool;
 pub use git_tools::GitTool;
+pub use search_symbol::SearchSymbolTool;
 pub use search_text::SearchTextTool;
 pub use shell_exec::ShellExecuteTool;

@@ -1341,6 +1341,22 @@ impl TurnEngine {
             )
             .await?,
         );
+        // §12.1 #2：项目规则进入上下文（CodeDock.md 与 .codedock/rules/*.md）。
+        for (rel, text) in self.load_project_rules() {
+            candidates.push(
+                self.candidate(
+                    "project_rule",
+                    Role::Instruction,
+                    SelectionReason::ProjectRule,
+                    90,
+                    SourceKind::File,
+                    format!("workspace://{rel}"),
+                    text,
+                    provider,
+                )
+                .await?,
+            );
+        }
         if let Some(task) = task.filter(|t| !t.trim().is_empty()) {
             candidates.push(
                 self.candidate(
@@ -1516,6 +1532,46 @@ impl TurnEngine {
         }
 
         Ok((snapshot, report))
+    }
+
+    /// 加载项目规则（§12.1 #2）：`CodeDock.md` 与 `.codedock/rules/*.md`。
+    /// 单文件上限 32KiB，防止规则文件挤爆预算；按文件名排序保证稳定。
+    fn load_project_rules(&self) -> Vec<(String, String)> {
+        const MAX_RULE_FILE_BYTES: u64 = 32 * 1024;
+        let mut out = Vec::new();
+
+        let top = self.workspace.join("CodeDock.md");
+        if let Ok(meta) = std::fs::metadata(&top)
+            && meta.is_file()
+            && meta.len() <= MAX_RULE_FILE_BYTES
+            && let Ok(text) = std::fs::read_to_string(&top)
+        {
+            out.push(("CodeDock.md".to_string(), text));
+        }
+
+        let rules_dir = self.workspace.join(".codedock/rules");
+        if let Ok(entries) = std::fs::read_dir(&rules_dir) {
+            let mut files: Vec<std::path::PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "md"))
+                .collect();
+            files.sort();
+            for path in files {
+                if let Ok(meta) = std::fs::metadata(&path)
+                    && meta.is_file()
+                    && meta.len() <= MAX_RULE_FILE_BYTES
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                {
+                    let rel = path
+                        .strip_prefix(&self.workspace)
+                        .map(|r| r.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    out.push((rel, text));
+                }
+            }
+        }
+        out
     }
 
     /// 构造候选条目并估算 Token（§8.4.3）；score 供预算装箱排序。
@@ -2610,6 +2666,93 @@ mod tests {
                 .iter()
                 .all(|c| c["selected"].is_boolean() && c["reason"].is_string())
         );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn project_rules_enter_snapshot() {
+        // §12.1 #2：CodeDock.md 与 .codedock/rules/*.md 作为 project_rule 候选进入上下文。
+        let ws = std::env::temp_dir().join(format!(
+            "codedock-turn-rules-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        tokio::fs::create_dir_all(ws.join(".codedock/rules"))
+            .await
+            .unwrap();
+        tokio::fs::write(ws.join("CodeDock.md"), "# 项目规则\n永远使用中文注释。")
+            .await
+            .unwrap();
+        tokio::fs::write(ws.join(".codedock/rules/style.md"), "禁止 unwrap。")
+            .await
+            .unwrap();
+
+        let provider = Arc::new(MockProvider::new("mock", "mock-model"));
+        provider.push_script(vec![ChatDelta::Text("已阅读项目规则。".into())]);
+        let (sessions, engine) = engine_with(
+            provider,
+            registry_with_file_read(&ws),
+            SessionBudgetLimits::default(),
+        )
+        .await;
+        // 引擎工作区指向测试工作区
+        let engine = TurnEngine::new(
+            engine.store.clone(),
+            engine.sessions.clone(),
+            engine.providers.clone(),
+            engine.tools.clone(),
+            engine.policy.clone(),
+            engine.routes.clone(),
+            engine.checkpoints.clone(),
+            ws.clone(),
+            SessionBudgetLimits::default(),
+        );
+        let info = sessions
+            .create(codedock_protocol::SessionMode::Ask, None, None)
+            .await
+            .unwrap();
+
+        let out = engine
+            .send_message(info.session_id, "你好", None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, TurnStatus::Completed);
+
+        let events = engine
+            .store
+            .load(info.session_id, 0, EVENT_SCAN_LIMIT, true)
+            .await
+            .unwrap();
+        let snapshot: ContextSnapshot = serde_json::from_value(
+            events
+                .iter()
+                .rev()
+                .find(|e| e.event_type == "context.snapshot.created")
+                .expect("应有快照")
+                .payload["snapshot"]
+                .clone(),
+        )
+        .unwrap();
+
+        let rules: Vec<&ContextItem> = snapshot
+            .items
+            .iter()
+            .filter(|i| i.kind == "project_rule")
+            .collect();
+        assert_eq!(rules.len(), 2, "CodeDock.md + style.md 都应入选");
+        assert!(
+            rules
+                .iter()
+                .all(|i| i.selection.reason == SelectionReason::ProjectRule)
+        );
+        assert!(rules.iter().any(|i| i.source.uri.ends_with("CodeDock.md")));
+        assert!(rules.iter().any(|i| i.source.uri.ends_with("style.md")));
+        // 规则文本进入上下文
+        assert!(matches!(
+            &rules[0].content,
+            ContextItemContent::Inline { text } if text.contains("项目规则") || text.contains("unwrap")
+        ));
 
         let _ = std::fs::remove_dir_all(&ws);
     }

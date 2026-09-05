@@ -172,6 +172,13 @@ fn build_tools(workspace: &Path) -> codedock_tool_runtime::ToolRegistry {
         ))),
     );
     expect(
+        "search.symbol",
+        tools.register(Box::new(codedock_tool_runtime::SearchSymbolTool::new(
+            workspace,
+            Arc::new(codedock_project_index::WorkspaceIndex::new()),
+        ))),
+    );
+    expect(
         "shell.execute",
         tools.register(Box::new(codedock_tool_runtime::ShellExecuteTool::new(
             workspace,

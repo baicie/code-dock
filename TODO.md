@@ -58,7 +58,14 @@
 
 ## 后续阶段（按路线图，勿提前）
 
-- [ ] **阶段 3** Context Engine 与透明追踪：Context Snapshot / Selection Report / Token Budget（§12）、ripgrep + Tree-sitter 索引、Secret 检测脱敏（§18.5）、Trust/Role 管线（§18.1）、Visual Replay。
+- [ ] **阶段 3** Context Engine 与透明追踪（2026-09-05 第一切口已落地，见下）：
+  - [x] SnapshotBuilder 预算装箱 + Selection Report 落事件（§8.4.9 / §12.3，退出标准"用户能查看选中和未选中上下文的原因"达成）
+  - [x] Secret 检测/脱敏统一管线：五类常见密钥形态，内容级 Redact 变换记录（§18.5）
+  - [x] `audit_payload` + `final_request_sha256`（§8.4.1，退出标准"任意模型请求可还原本地发送的最终载荷"达成）
+  - [ ] ripgrep + Tree-sitter 符号索引（project-index，§12.1/§12.2）
+  - [ ] 检索顺序接入（关键词/符号/Git/Diagnostics 检索来源作为 Retriever）
+  - [ ] Trust/Role 溯源管线细化（§18.1：按内容来源放宽副作用工具的保守审批）
+  - [ ] Visual Replay 事件回放视图（阶段 4 UI 的前置）
 - [ ] **阶段 4** Desktop DevTools Alpha：Tauri 2 + React，Console/Context/Tools/Network/Changes/Trace/Security 面板（§14），Monaco + xterm.js。
 - [ ] **阶段 5** Plugin System v1：Wasmtime + WIT、`.cdplugin`、Rust/TS SDK、Native Sidecar Supervisor（§10）。
 - [ ] **阶段 6** Mobile Remote：PWA、QR 配对、E2EE Relay、远程审批（§16）。

@@ -93,7 +93,7 @@ jobs:
           ./target/release/codedock --version
           ./target/release/codedock-daemon --version
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: codedock-linux-${{ github.sha }}
           path: |

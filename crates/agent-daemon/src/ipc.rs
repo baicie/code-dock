@@ -7,11 +7,10 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use codedock_protocol::{JsonRpcRequest, JsonRpcResponse};
-use codedock_session_engine::SessionManager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::rpc;
+use crate::{Runtime, rpc};
 
 /// 绑定 Unix Domain Socket（Windows Named Pipe 在阶段 1 补充，§18.8）。
 pub async fn bind(socket_path: &str) -> anyhow::Result<UnixListener> {
@@ -23,10 +22,7 @@ pub async fn bind(socket_path: &str) -> anyhow::Result<UnixListener> {
 }
 
 /// 接受连接并逐连接处理（并发安全；runtime 内部自带同步）。
-pub async fn accept_loop(
-    listener: UnixListener,
-    runtime: Arc<dyn SessionManager>,
-) -> anyhow::Result<()> {
+pub async fn accept_loop(listener: UnixListener, runtime: Arc<Runtime>) -> anyhow::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;
         let rt = runtime.clone();
@@ -39,7 +35,7 @@ pub async fn accept_loop(
 }
 
 /// 换行分隔 JSON-RPC 服务循环：直到客户端断开。
-async fn serve(runtime: Arc<dyn SessionManager>, stream: UnixStream) -> anyhow::Result<()> {
+async fn serve(runtime: Arc<Runtime>, stream: UnixStream) -> anyhow::Result<()> {
     tracing::debug!("客户端已连接");
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).split(b'\n');
@@ -51,7 +47,7 @@ async fn serve(runtime: Arc<dyn SessionManager>, stream: UnixStream) -> anyhow::
         let response: JsonRpcResponse = match serde_json::from_slice::<JsonRpcRequest>(&chunk) {
             Ok(req) => {
                 tracing::debug!(method = %req.method, id = %req.id, "收到 RPC");
-                rpc::dispatch(runtime.as_ref(), req).await
+                rpc::dispatch(&runtime, req).await
             }
             Err(err) => rpc::parse_error(format!("请求解析失败: {err}")),
         };

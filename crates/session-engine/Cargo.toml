@@ -10,7 +10,9 @@ authors.workspace = true
 [dependencies]
 codedock-protocol = { workspace = true }
 codedock-event-store = { workspace = true }
+codedock-model-gateway = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

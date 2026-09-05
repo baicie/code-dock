@@ -5,12 +5,14 @@
 //!   追加到 Event Store，并保证命令幂等（§8.2.6）。
 
 pub mod manager;
+pub mod turn;
 
 use codedock_protocol::{SessionId, SessionMode, SessionStatus};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use manager::{EventSourcedSessionManager, SessionInfo};
+pub use turn::{TurnEngine, TurnError, TurnOutcome};
 
 /// 计划步骤状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

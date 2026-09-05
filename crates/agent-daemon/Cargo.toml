@@ -15,6 +15,7 @@ path = "src/main.rs"
 codedock-protocol = { workspace = true }
 codedock-event-store = { workspace = true }
 codedock-session-engine = { workspace = true }
+codedock-model-gateway = { workspace = true }
 codedock-policy-engine = { workspace = true }
 codedock-secret-store = { workspace = true }
 codedock-artifact-store = { workspace = true }
@@ -23,6 +24,7 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

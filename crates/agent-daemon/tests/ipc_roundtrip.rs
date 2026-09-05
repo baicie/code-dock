@@ -1,12 +1,9 @@
 //! 端到端集成测试：真实 UDS 上的 JSON-RPC 往返（阶段 1 退出标准的基础：
 //! CLI 无 GUI 完成会话控制；断线重放无丢失）。
 
-use codedock_agent_daemon::ipc;
-use codedock_event_store::InMemoryEventStore;
+use codedock_agent_daemon::{assemble_in_memory, ipc};
 use codedock_protocol::{JsonRpcId, JsonRpcRequest, JsonRpcResponse};
-use codedock_session_engine::{EventSourcedSessionManager, SessionManager};
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -22,8 +19,7 @@ fn socket_path() -> String {
 async fn spawn_daemon() -> String {
     let path = socket_path();
     let listener = ipc::bind(&path).await.unwrap();
-    let store = Arc::new(InMemoryEventStore::new());
-    let runtime: Arc<dyn SessionManager> = Arc::new(EventSourcedSessionManager::new(store));
+    let runtime = assemble_in_memory().await;
     tokio::spawn(async move { ipc::accept_loop(listener, runtime).await });
     path
 }
@@ -206,6 +202,85 @@ async fn concurrent_connections_are_served() {
         .unwrap()
         .to_string();
     assert_ne!(sid_a, sid_b);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 纯对话 Turn 走真实 IPC 全链路（阶段 1 退出标准：无 GUI 完成一次对话）。
+#[tokio::test]
+async fn chat_turn_over_real_ipc() {
+    let path = spawn_daemon().await;
+    let mut cli = Client::connect(&path).await;
+
+    let resp = cli
+        .call(
+            "1",
+            "session.create",
+            json!({ "mode": "ask", "task": "演示对话" }),
+        )
+        .await;
+    let sid = resp.result.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 一轮完整对话：用户消息 → Mock 回声。
+    let resp = cli
+        .call(
+            "2",
+            "session.message",
+            json!({ "session_id": sid, "text": "你好", "idempotency_key": "k-chat" }),
+        )
+        .await;
+    let out = resp.result.unwrap();
+    assert_eq!(out["text"], "echo: 你好");
+    let turn_id = out["turn_id"].as_str().unwrap().to_string();
+    assert!(!turn_id.is_empty());
+
+    // 事件流可重放整个 Turn（durable），transient delta 不在其中。
+    let resp = cli
+        .call(
+            "3",
+            "session.events",
+            json!({ "session_id": sid, "after_sequence": 0, "durable_only": true }),
+        )
+        .await;
+    let events = resp.result.unwrap()["events"].as_array().unwrap().clone();
+    let types: Vec<&str> = events
+        .iter()
+        .map(|e| e["event_type"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "turn.started",
+        "message.created",
+        "context.snapshot.created",
+        "model.request.started",
+        "message.completed",
+        "model.request.completed",
+        "turn.completed",
+    ] {
+        assert!(types.contains(&expected), "缺少 {expected}: {types:?}");
+    }
+    assert!(!types.contains(&"message.delta"));
+    // 助手最终消息内容可从事件流恢复。
+    let completed = events
+        .iter()
+        .find(|e| e["event_type"] == "message.completed")
+        .unwrap();
+    assert_eq!(completed["payload"]["text"], "echo: 你好");
+    assert_eq!(completed["payload"]["role"], "assistant");
+
+    // 取消后为终态：再发消息被拒。
+    cli.call("4", "session.cancel", json!({ "session_id": sid }))
+        .await;
+    let resp = cli
+        .call(
+            "5",
+            "session.message",
+            json!({ "session_id": sid, "text": "hi" }),
+        )
+        .await;
+    assert!(resp.error.is_some());
 
     let _ = std::fs::remove_file(&path);
 }

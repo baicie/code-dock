@@ -33,6 +33,8 @@ enum Commands {
     },
     /// 查看会话状态。
     Status { session_id: String },
+    /// 发送一条用户消息并等待本轮对话完成（同步返回助手最终回复）。
+    Message { session_id: String, text: String },
     /// 暂停会话。
     Pause { session_id: String },
     /// 恢复会话。
@@ -72,6 +74,10 @@ async fn main() -> anyhow::Result<()> {
             json!({ "mode": mode, "task": task, "idempotency_key": new_key() }),
         ),
         Commands::Status { session_id } => ("session.status", json!({ "session_id": session_id })),
+        Commands::Message { session_id, text } => (
+            "session.message",
+            json!({ "session_id": session_id, "text": text, "idempotency_key": new_key() }),
+        ),
         Commands::Pause { session_id } => (
             "session.pause",
             json!({ "session_id": session_id, "idempotency_key": new_key() }),
@@ -107,6 +113,18 @@ async fn main() -> anyhow::Result<()> {
                 result["session_id"].as_str().unwrap_or("?"),
                 result["mode"].as_str().unwrap_or("?"),
                 result["status"].as_str().unwrap_or("?"),
+            );
+        }
+        "session.message" => {
+            if let Some(text) = result["text"].as_str() {
+                println!("{text}");
+            }
+            println!(
+                "--- turn {} | tokens in {} / out {} | seq {}",
+                result["turn_id"].as_str().unwrap_or("?"),
+                result["input_tokens"],
+                result["output_tokens"],
+                result["latest_sequence"],
             );
         }
         "session.events" => {

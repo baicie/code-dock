@@ -8,9 +8,11 @@
 
 pub mod mock;
 pub mod openai;
+pub mod registry;
 
 pub use mock::MockProvider;
 pub use openai::{OpenAICompatibleProvider, OpenAIProviderConfig};
+pub use registry::ProviderRegistry;
 
 use async_trait::async_trait;
 use codedock_protocol::{Classification, ContextSnapshot};
@@ -117,13 +119,53 @@ pub struct RoutingConfig {
 }
 
 /// Session 级预算上限（§18.3：无限循环和费用失控防护）。
+///
+/// 字段级 serde 默认值允许配置文件只覆盖关心的项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionBudgetLimits {
+    #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    #[serde(default = "default_max_model_calls")]
     pub max_model_calls: u32,
+    #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: u32,
+    #[serde(default = "default_max_duration_ms")]
     pub max_duration_ms: u64,
+    #[serde(default = "default_max_total_tokens")]
     pub max_total_tokens: u64,
+}
+
+fn default_max_turns() -> u32 {
+    200
+}
+
+fn default_max_model_calls() -> u32 {
+    400
+}
+
+fn default_max_tool_calls() -> u32 {
+    800
+}
+
+fn default_max_duration_ms() -> u64 {
+    1_800_000
+}
+
+fn default_max_total_tokens() -> u64 {
+    4_000_000
+}
+
+impl Default for SessionBudgetLimits {
+    /// 阶段 1 保守默认值；生产部署应由配置显式给出（§18.3）。
+    fn default() -> Self {
+        Self {
+            max_turns: default_max_turns(),
+            max_model_calls: default_max_model_calls(),
+            max_tool_calls: default_max_tool_calls(),
+            max_duration_ms: default_max_duration_ms(),
+            max_total_tokens: default_max_total_tokens(),
+        }
+    }
 }
 
 #[cfg(test)]

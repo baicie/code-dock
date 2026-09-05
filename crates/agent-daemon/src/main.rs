@@ -3,7 +3,7 @@
 //! 职责（§6）：进程生命周期、RPC、客户端连接、模块装配。
 //!
 //! 阶段 1（§23）交付：Daemon、JSON-RPC、Local IPC、Session Engine、
-//! Event Store、SQLite Migration、OpenAI-Compatible Provider。
+//! Event Store、SQLite Migration、OpenAI-Compatible Provider、纯对话 Turn 闭环。
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -19,6 +19,10 @@ struct Args {
     /// Local IPC 监听地址（Unix Domain Socket 路径）。
     #[arg(long, default_value = "/tmp/codedock.sock")]
     socket: String,
+
+    /// Daemon 配置文件（模型 Provider 与预算上限，§11.2/§11.3/§18.3）。
+    #[arg(long, default_value = "~/.codedock/config.toml")]
+    config: String,
 }
 
 /// 展开 `~` 前缀为用户主目录（阶段 1 只处理 Unix 约定）。
@@ -47,23 +51,23 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     let data_dir = expand_tilde(&args.data_dir);
+    let model_config = config::ModelLayerConfig::load(&expand_tilde(&args.config))?;
     let config = config::DaemonConfig {
         data_dir: data_dir.display().to_string(),
         socket_path: args.socket.clone(),
+        model: model_config,
     };
     tracing::info!(?config, "CodeDock daemon 正在启动");
 
     // ---- 模块装配（§5 架构）----
-    // SQLite Event Store（WAL + 显式版本迁移 §18.9）+ 事件流重建 Projection（§17.1）。
-    // TODO(阶段1)：磁盘 Blob Store + OS Keychain；
-    // TODO(阶段1/2)：装配 model-gateway / tool-runtime / plugin-host。
-    let (_event_store, runtime) = assemble_sqlite(&data_dir).await?;
-    let _blob_store = codedock_artifact_store::InMemoryBlobStore::new();
-    let _secret_store = codedock_secret_store::InMemorySecretStore::new();
-    let _policy = codedock_policy_engine::DefaultPolicyEngine;
-
+    // SQLite Event Store（WAL + 显式版本迁移 §18.9）→ 会话 Projection 重建（§17.1）
+    // → 密钥注入 SecretStore → Provider 注册表 → Turn 引擎（含幂等缓存重建）。
+    // TODO(阶段1)：磁盘 Blob Store；TODO(阶段1/2)：tool-runtime / plugin-host 装配。
+    let runtime = assemble_sqlite(&data_dir, &config.model).await?;
     tracing::info!(
-        "模块装配完成: sqlite_event_store / session_runtime / blob_store / secret_store / policy_engine"
+        default_provider = %config.model.default_provider,
+        providers = ?config.model.providers.keys().collect::<Vec<_>>(),
+        "模块装配完成: sqlite_event_store / session_manager / turn_engine / secret_store / provider_registry"
     );
 
     // ---- Local IPC：Unix Domain Socket（§2）----
@@ -75,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- 连接循环 + 优雅停机 ----
     let shutdown = tokio::signal::ctrl_c();
     tokio::select! {
-        res = ipc::accept_loop(listener, runtime.clone()) => {
+        res = ipc::accept_loop(listener, runtime.into()) => {
             res.context("IPC accept loop 异常退出")?;
         }
         _ = shutdown => {

@@ -42,12 +42,6 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[(
     ",
 )];
 
-const SELECT_COLUMNS: &str = "
-    SELECT schema_version, event_id, session_id, turn_id, sequence, event_type,
-           durability, occurred_at, actor_kind, actor_id, correlation_id,
-           causation_event_id, payload
-    FROM events";
-
 /// SQLite 实现（阶段 1 默认存储）。
 pub struct SqliteEventStore {
     pool: SqlitePool,
@@ -275,16 +269,25 @@ impl EventStore for SqliteEventStore {
         limit: usize,
         durable_only: bool,
     ) -> Result<Vec<EventEnvelope>, EventStoreError> {
+        // 两条完整字面量：无动态拼接（sqlx 0.9 SqlSafeStr 审计语义下也无需豁免）。
         let sql = if durable_only {
-            format!(
-                "{SELECT_COLUMNS} WHERE session_id = ? AND sequence > ? AND durability = 'durable' ORDER BY sequence LIMIT ?"
+            concat!(
+                "SELECT schema_version, event_id, session_id, turn_id, sequence, event_type,",
+                " durability, occurred_at, actor_kind, actor_id, correlation_id,",
+                " causation_event_id, payload",
+                " FROM events WHERE session_id = ? AND sequence > ? AND durability = 'durable'",
+                " ORDER BY sequence LIMIT ?"
             )
         } else {
-            format!(
-                "{SELECT_COLUMNS} WHERE session_id = ? AND sequence > ? ORDER BY sequence LIMIT ?"
+            concat!(
+                "SELECT schema_version, event_id, session_id, turn_id, sequence, event_type,",
+                " durability, occurred_at, actor_kind, actor_id, correlation_id,",
+                " causation_event_id, payload",
+                " FROM events WHERE session_id = ? AND sequence > ?",
+                " ORDER BY sequence LIMIT ?"
             )
         };
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sql)
             .bind(session_id.to_string())
             .bind(i64::try_from(after_sequence).unwrap_or(i64::MAX))
             .bind(limit as i64)
@@ -308,10 +311,15 @@ impl EventStore for SqliteEventStore {
     async fn load_all_sessions(
         &self,
     ) -> Result<Vec<(SessionId, Vec<EventEnvelope>)>, EventStoreError> {
-        let rows = sqlx::query(&format!("{SELECT_COLUMNS} ORDER BY session_id, sequence"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
+        let rows = sqlx::query(concat!(
+            "SELECT schema_version, event_id, session_id, turn_id, sequence, event_type,",
+            " durability, occurred_at, actor_kind, actor_id, correlation_id,",
+            " causation_event_id, payload",
+            " FROM events ORDER BY session_id, sequence"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
 
         // ORDER BY session_id 保证同一会话的事件相邻，按序分组。
         let mut sessions: Vec<(SessionId, Vec<EventEnvelope>)> = Vec::new();

@@ -8,7 +8,7 @@
 //!
 //! 不可信内容（external_untrusted）引导出的副作用操作，默认至少提升一级审批要求（§18.1）。
 
-use codedock_protocol::{Capability, Risk, SessionMode, Trust};
+use codedock_protocol::{Capability, Effect, Risk, SessionMode, Trust};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -46,6 +46,8 @@ pub struct PolicyContext {
     pub resource: String,
     pub risk: Risk,
     pub trust: Trust,
+    /// 工具副作用声明（§8.3.7：Ask/Plan 仅允许 none）。
+    pub effect: Effect,
     pub capabilities: Vec<Capability>,
 }
 
@@ -56,6 +58,7 @@ impl PolicyContext {
         resource: impl Into<String>,
         risk: Risk,
         trust: Trust,
+        effect: Effect,
     ) -> Self {
         Self {
             session_mode,
@@ -63,6 +66,7 @@ impl PolicyContext {
             resource: resource.into(),
             risk,
             trust,
+            effect,
             capabilities: Vec::new(),
         }
     }
@@ -156,6 +160,17 @@ impl PolicyEngine for DefaultPolicyEngine {
             };
         }
 
+        // §8.3.7：Ask/Plan 中仅允许无副作用读操作——任何 effect != none 的
+        // 工具无论风险等级一律拒绝（含 Low 写操作）。
+        if matches!(ctx.session_mode, SessionMode::Ask | SessionMode::Plan)
+            && ctx.effect != Effect::None
+        {
+            return PolicyDecision::Deny {
+                reason: "Ask/Plan 模式下仅允许无副作用读操作".into(),
+            };
+        }
+
+        // §18.1：由不可信内容（工作区文件、工具输出等）引导的操作提升一级。
         let risk = Self::escalated_for_trust(ctx.risk, ctx.trust);
 
         match risk {
@@ -188,6 +203,7 @@ mod tests {
             "$workspace/src/main.rs",
             Risk::Medium,
             Trust::Trusted,
+            Effect::Possible,
         );
         assert!(matches!(
             DefaultPolicyEngine.decide(&ctx),
@@ -203,6 +219,7 @@ mod tests {
             "origin main",
             Risk::High,
             Trust::Trusted,
+            Effect::Guaranteed,
         );
         assert!(matches!(
             DefaultPolicyEngine.decide(&ctx),
@@ -219,6 +236,7 @@ mod tests {
             "./gradlew test",
             Risk::Medium,
             Trust::ExternalUntrusted,
+            Effect::Possible,
         );
         assert!(matches!(
             DefaultPolicyEngine.decide(&ctx),
@@ -233,11 +251,65 @@ mod tests {
             "file.read",
             "~/.ssh/id_rsa",
             Risk::Low,
-            Trust::WorkspaceUntrusted,
+            Trust::Trusted,
+            Effect::None,
         );
         assert!(matches!(
             DefaultPolicyEngine.decide(&ctx),
             PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn medium_side_effect_denied_in_ask_regardless_of_escalation() {
+        // §8.3.7：Ask 模式 effect != none 一律拒绝（即使 trust 提升后仍是 Medium）
+        let ctx = PolicyContext::new(
+            SessionMode::Ask,
+            "file.patch",
+            "$workspace/src/main.rs",
+            Risk::Low,
+            Trust::Trusted,
+            Effect::Possible,
+        );
+        assert!(matches!(
+            DefaultPolicyEngine.decide(&ctx),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn medium_auto_allowed_in_edit_on_trusted_context() {
+        // §8.3.7：Edit 模式下 Medium 按项目策略自动允许——干净上下文（模型
+        // 尚未读过工作区内容）时 trust=Trusted，无提升
+        let ctx = PolicyContext::new(
+            SessionMode::Edit,
+            "file.patch",
+            "$workspace/src/main.rs",
+            Risk::Medium,
+            Trust::Trusted,
+            Effect::Possible,
+        );
+        assert!(matches!(
+            DefaultPolicyEngine.decide(&ctx),
+            PolicyDecision::Allow
+        ));
+    }
+
+    #[test]
+    fn medium_escalates_to_approval_after_untrusted_content() {
+        // §18.1：模型读过工作区内容（trust=workspace_untrusted）后，
+        // Medium 提升 High → 审批
+        let ctx = PolicyContext::new(
+            SessionMode::Edit,
+            "file.patch",
+            "$workspace/src/main.rs",
+            Risk::Medium,
+            Trust::WorkspaceUntrusted,
+            Effect::Possible,
+        );
+        assert!(matches!(
+            DefaultPolicyEngine.decide(&ctx),
+            PolicyDecision::RequireApproval { .. }
         ));
     }
 

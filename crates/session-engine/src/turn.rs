@@ -596,6 +596,9 @@ impl TurnEngine {
                 .await?;
             let model_request_id = snapshot.model_request_id;
             let used_input_tokens = snapshot.budget.used_input_tokens;
+            // §18.1 溯源：上下文中存在 Data 条目（工作区文件、工具输出）时，
+            // 模型的副作用提案视为可能被不可信内容引导。
+            let context_has_untrusted = snapshot.items.iter().any(|i| i.role == Role::Data);
             self.append(
                 session_id,
                 turn_id,
@@ -768,6 +771,7 @@ impl TurnEngine {
                     session_mode,
                     idempotency_key.clone(),
                     task_kind,
+                    context_has_untrusted,
                 )
                 .await?
             {
@@ -804,6 +808,7 @@ impl TurnEngine {
         session_mode: SessionMode,
         original_key: Option<String>,
         task_kind: TaskKind,
+        context_has_untrusted: bool,
     ) -> Result<ToolFlow, TurnError> {
         self.check_tool_budget(session_id).await?;
         let tool_call_id = ToolCallId::generate();
@@ -861,9 +866,11 @@ impl TurnEngine {
         )
         .await?;
 
-        // 策略上下文：资源取首个 permission 的 resource；只读工具（effect=none）
-        // 视为可信读操作（§8.3.7 Low 读操作在 Ask/Plan 放行）；
-        // 有副作用的工具默认 workspace_untrusted，按 §18.1 提升审批等级。
+        // 策略上下文（§8.3.7 / §18.1）：
+        // - 只读工具（effect=none）永远 Trusted；
+        // - 副作用工具的 trust 取决于溯源——上下文中已有 Data 条目（模型读过
+        //   工作区内容/收到工具输出）时视为可能被不可信内容引导，提升一级；
+        //   干净上下文（提案直接源于用户指令）按 §8.3.7 默认策略执行。
         let resource = plan
             .permissions
             .first()
@@ -871,7 +878,13 @@ impl TurnEngine {
             .unwrap_or_default();
         let trust = match definition.effect {
             Effect::None => Trust::Trusted,
-            Effect::Possible | Effect::Guaranteed => Trust::WorkspaceUntrusted,
+            Effect::Possible | Effect::Guaranteed => {
+                if context_has_untrusted {
+                    Trust::WorkspaceUntrusted
+                } else {
+                    Trust::Trusted
+                }
+            }
         };
         let decision = self.policy.decide(&PolicyContext::new(
             session_mode,
@@ -879,6 +892,7 @@ impl TurnEngine {
             resource.clone(),
             plan.risk,
             trust,
+            definition.effect,
         ));
         let mut decision_payload = json!({
             "tool_call_id": tool_call_id,
@@ -886,6 +900,8 @@ impl TurnEngine {
             "decision": decision_tag(&decision),
             "risk": plan.risk.to_string(),
             "resource": resource,
+            "trust": trust.to_string(),
+            "context_untrusted": context_has_untrusted,
         });
         match &decision {
             PolicyDecision::Allow => {}
@@ -2457,15 +2473,10 @@ mod tests {
             .create(codedock_protocol::SessionMode::Edit, None, None)
             .await
             .unwrap();
-        // Medium 写操作在默认语境下升级为审批（§18.1）
+        // §8.3.7 + §18.1：干净上下文（模型尚未读过工作区内容）下
+        // Medium 写操作在 Edit 模式自动放行——溯源可信。
         let out = engine
             .send_message(info.session_id, "改文档", None)
-            .await
-            .unwrap();
-        assert_eq!(out.status, TurnStatus::WaitingApproval);
-        let pending_id = out.pending_tool_call_id.expect("应有待审批 id");
-        let out = engine
-            .resolve_approval(info.session_id, &pending_id, true, None)
             .await
             .unwrap();
         assert_eq!(out.status, TurnStatus::Completed);
@@ -2474,10 +2485,11 @@ mod tests {
 
         let types = durable_types(&engine, info.session_id).await;
         assert!(types.contains(&"checkpoint.created".to_string()));
-        assert!(types.contains(&"tool.call.approved".to_string()));
         assert!(types.contains(&"tool.call.completed".to_string()));
+        assert!(!types.contains(&"tool.call.approved".to_string()));
 
-        // 第二轮：stale hash → Preflight 即 change.conflicted，不进入审批
+        // 第二轮：stale hash → Preflight 即 change.conflicted（冲突检测先于
+        // 审批，不打扰用户），提案被拒后模型收尾。
         let out = engine
             .send_message(info.session_id, "再来一次旧补丁", None)
             .await
@@ -2486,6 +2498,11 @@ mod tests {
         let types = durable_types(&engine, info.session_id).await;
         assert!(types.contains(&"change.conflicted".to_string()));
         assert!(types.contains(&"tool.call.rejected".to_string()));
+        assert_eq!(
+            types.iter().filter(|t| **t == "tool.call.approved").count(),
+            0,
+            "冲突轮不应进入审批"
+        );
         // 冲突轮不产生第二个 completed（本轮无 started）
         assert_eq!(
             types.iter().filter(|t| **t == "tool.call.started").count(),
@@ -2758,6 +2775,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn side_effect_escalates_after_reading_workspace() {
+        // §18.1 完整链路：读文件（Trusted Low 放行）→ 上下文含 Data →
+        // 同 Turn 内 Medium 写提案升级 High → 审批。
+        let ws = std::env::temp_dir().join(format!(
+            "codedock-turn-escalate-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        tokio::fs::create_dir_all(&ws).await.unwrap();
+        tokio::fs::write(ws.join("note.txt"), "内容").await.unwrap();
+        std::fs::write(std::env::temp_dir().join("escalate.txt"), "旧").unwrap();
+
+        let provider = Arc::new(MockProvider::new("mock", "mock-model"));
+        provider.push_script(vec![ChatDelta::ToolProposal {
+            name: "file.read".into(),
+            arguments: json!({ "path": "note.txt" }),
+        }]);
+        // 文本与写提案在同一次模型调用中：Turn 不中断，写提案时上下文已含读到的 Data。
+        provider.push_script(vec![
+            ChatDelta::Text("读完了。".into()),
+            ChatDelta::ToolProposal {
+                name: "test.write".into(),
+                arguments: json!({ "path": "escalate.txt" }),
+            },
+        ]);
+        provider.push_script(vec![ChatDelta::Text("已获批准并写入。".into())]);
+
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Box::new(codedock_tool_runtime::FileReadTool::new(&ws)))
+            .unwrap();
+        tools
+            .register(Box::new(TestWriteTool {
+                risk: Risk::Medium,
+                path_arg: "escalate.txt".into(),
+            }))
+            .unwrap();
+        let (sessions, engine) =
+            engine_with(provider, Arc::new(tools), SessionBudgetLimits::default()).await;
+        let engine = TurnEngine::new(
+            engine.store.clone(),
+            engine.sessions.clone(),
+            engine.providers.clone(),
+            engine.tools.clone(),
+            engine.policy.clone(),
+            engine.routes.clone(),
+            engine.checkpoints.clone(),
+            ws.clone(),
+            SessionBudgetLimits::default(),
+        );
+        let info = sessions
+            .create(codedock_protocol::SessionMode::Edit, None, None)
+            .await
+            .unwrap();
+
+        let out = engine
+            .send_message(info.session_id, "读了再写", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.status,
+            TurnStatus::WaitingApproval,
+            "读过后写操作应升级审批"
+        );
+
+        // 裁决事件里的 trust 应为 workspace_untrusted
+        let events = engine
+            .store
+            .load(info.session_id, 0, EVENT_SCAN_LIMIT, true)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|e| {
+            e.event_type == "policy.decision_made"
+                && e.payload["trust"] == "workspace_untrusted"
+                && e.payload["context_untrusted"] == true
+        }));
+
+        let tool_call_id = {
+            let pending = engine.pending.lock().unwrap();
+            pending.keys().next().unwrap().clone()
+        };
+        let out = engine
+            .resolve_approval(info.session_id, &tool_call_id, true, None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, TurnStatus::Completed);
+        assert_eq!(out.text, "已获批准并写入。");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
     async fn paused_session_rejects_message() {
         let provider = Arc::new(MockProvider::new("mock", "mock-model"));
         let dir = std::env::temp_dir();
@@ -2912,8 +3021,8 @@ mod tests {
         assert_eq!(status.status, SessionStatus::Running);
     }
     #[tokio::test]
-    async fn medium_side_effect_escalates_to_approval_in_ask() {
-        // §18.1：Medium 有副作用工具在不可信语境下提升一级 → High → 审批。
+    async fn side_effect_tool_denied_in_ask_mode() {
+        // §8.3.7：Ask 模式 effect != none 一律拒绝（即使风险 Low）。
         let provider = Arc::new(MockProvider::new("mock", "mock-model"));
         provider.push_script(vec![ChatDelta::ToolProposal {
             name: "test.write".into(),
@@ -2922,7 +3031,7 @@ mod tests {
         provider.push_script(vec![ChatDelta::Text("已按要求中止。".into())]);
 
         let tools = registry_with(vec![Box::new(TestWriteTool {
-            risk: Risk::Medium,
+            risk: Risk::Low,
             path_arg: "out.txt".into(),
         }) as Box<dyn ToolExecutor>]);
         let (sessions, engine) = engine_with(provider, tools, SessionBudgetLimits::default()).await;
@@ -2935,7 +3044,7 @@ mod tests {
             .send_message(info.session_id, "写个文件", None)
             .await
             .unwrap();
-        assert_eq!(out.status, TurnStatus::WaitingApproval);
+        assert_eq!(out.status, TurnStatus::Completed);
 
         let events = engine
             .store
@@ -2944,11 +3053,11 @@ mod tests {
             .unwrap();
         assert!(events.iter().any(|e| {
             e.event_type == "policy.decision_made"
-                && e.payload["decision"] == "require_approval"
+                && e.payload["decision"] == "deny"
                 && e.payload["reason"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("High")
+                    .contains("仅允许无副作用读操作")
         }));
     }
 }

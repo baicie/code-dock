@@ -2,8 +2,8 @@
  * Context 面板（§14.1）：每轮真实上下文、Token 预算、来源与选择原因、
  * 变换记录（脱敏等）、排除项、最终请求哈希（§8.4.1 / §8.4.9 可解释性）。
  */
-import { useState } from "react";
-import type { ConsoleState, SnapshotView } from "../events";
+import { useEffect, useState } from "react";
+import type { ConsoleState, SnapshotView, ToolCallView } from "../events";
 
 const REASON_ZH: Record<string, string> = {
   user_attached: "用户附加",
@@ -47,7 +47,34 @@ function BudgetBar({ view }: { view: SnapshotView }) {
   );
 }
 
-function SnapshotDetail({ view }: { view: SnapshotView }) {
+function TurnToolLinks({
+  tools,
+  onJumpToTools,
+}: {
+  tools: ToolCallView[];
+  onJumpToTools?: (toolCallId: string) => void;
+}) {
+  if (tools.length === 0 || !onJumpToTools) return null;
+  return (
+    <div className="trace-links">
+      {tools.map((t) => (
+        <button key={t.toolCallId} className="link" onClick={() => onJumpToTools(t.toolCallId)}>
+          本 Turn 工具：{t.tool ?? t.toolCallId.slice(0, 8)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function SnapshotDetail({
+  view,
+  tools,
+  onJumpToTools,
+}: {
+  view: SnapshotView;
+  tools: ToolCallView[];
+  onJumpToTools?: (toolCallId: string) => void;
+}) {
   const excluded = view.considered.filter((c) => !c.selected);
   return (
     <div className="snapshot">
@@ -62,6 +89,7 @@ function SnapshotDetail({ view }: { view: SnapshotView }) {
         )}
       </div>
       <BudgetBar view={view} />
+      <TurnToolLinks tools={tools} onJumpToTools={onJumpToTools} />
 
       <table className="items">
         <thead>
@@ -109,13 +137,30 @@ function SnapshotDetail({ view }: { view: SnapshotView }) {
   );
 }
 
-export function ContextPanel({ state }: { state: ConsoleState }) {
+export function ContextPanel({
+  state,
+  focusSnapshotSequence,
+  onJumpToTools,
+}: {
+  state: ConsoleState;
+  focusSnapshotSequence?: number;
+  onJumpToTools?: (toolCallId: string) => void;
+}) {
   const [selected, setSelected] = useState(0);
+  // 跨面板跳转：外部指定快照 sequence 时自动选中
+  useEffect(() => {
+    if (focusSnapshotSequence === undefined) return;
+    const idx = state.snapshots.findIndex((s) => s.sequence === focusSnapshotSequence);
+    if (idx >= 0) setSelected(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSnapshotSequence]);
+
   if (state.snapshots.length === 0) {
     return <p className="muted panel-empty">还没有上下文快照（发起一轮对话后出现）</p>;
   }
   const idx = Math.min(selected, state.snapshots.length - 1);
   const view = state.snapshots[idx];
+  const turnTools = state.toolCalls.filter((t) => t.turnId === view.turnId);
   return (
     <div className="panel">
       <div className="snapshot-picker">
@@ -130,7 +175,7 @@ export function ContextPanel({ state }: { state: ConsoleState }) {
           第 {idx + 1} / {state.snapshots.length} 次模型调用
         </span>
       </div>
-      <SnapshotDetail view={view} />
+      <SnapshotDetail view={view} tools={turnTools} onJumpToTools={onJumpToTools} />
     </div>
   );
 }

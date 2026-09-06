@@ -71,6 +71,7 @@ export interface ToolDecision {
 
 export interface ToolCallView {
   toolCallId: string;
+  turnId?: string;
   tool?: string;
   arguments?: unknown;
   plan?: ToolPlan;
@@ -122,6 +123,8 @@ export interface ConsoleState {
   toolCalls: ToolCallView[];
   checkpoints: CheckpointView[];
   conflicts: ChangeConflict[];
+  /// 原始事件（Trace 面板按 turn 还原因果链用）。
+  rawEvents: EventEnvelope[];
 }
 
 // ---------- 折叠 ----------
@@ -134,6 +137,7 @@ export function initialState(): ConsoleState {
     toolCalls: [],
     checkpoints: [],
     conflicts: [],
+    rawEvents: [],
   };
 }
 
@@ -149,7 +153,7 @@ export function foldEvent(state: ConsoleState, ev: EventEnvelope): ConsoleState 
   let next: ConsoleState = {
     ...state,
     timeline: [...state.timeline, describe(ev)],
-    toolCalls: state.toolCalls,
+    rawEvents: [...state.rawEvents, ev],
   };
   next = foldMessage(next, ev);
   next = foldSnapshot(next, ev);
@@ -158,7 +162,7 @@ export function foldEvent(state: ConsoleState, ev: EventEnvelope): ConsoleState 
   return next;
 }
 
-function describe(ev: EventEnvelope): TimelineEntry {
+export function describe(ev: EventEnvelope): TimelineEntry {
   const p = ev.payload as Record<string, unknown>;
   let type = ev.event_type;
   switch (ev.event_type) {
@@ -200,6 +204,61 @@ function describe(ev: EventEnvelope): TimelineEntry {
       break;
   }
   return { sequence: ev.sequence, type, durability: ev.durability };
+}
+
+/** Trace 面板：按 turn 分组的因果链（§14.1 从用户指令到工具和变更的完整时间线）。 */
+export interface TraceTurn {
+  turnId: string;
+  startSequence: number;
+  userText?: string;
+  entries: TimelineEntry[];
+  toolCallIds: string[];
+  snapshotSequences: number[];
+  status: "completed" | "failed" | "waiting_approval" | "open";
+}
+
+export function deriveTrace(state: ConsoleState): TraceTurn[] {
+  const turns = new Map<string, TraceTurn>();
+  const openTail: EventEnvelope[] = [];
+  for (const ev of state.rawEvents) {
+    if (!ev.turn_id) {
+      openTail.push(ev);
+      continue;
+    }
+    let turn = turns.get(ev.turn_id);
+    if (!turn) {
+      turn = {
+        turnId: ev.turn_id,
+        startSequence: ev.sequence,
+        entries: [],
+        toolCallIds: [],
+        snapshotSequences: [],
+        status: "open",
+      };
+      turns.set(ev.turn_id, turn);
+    }
+    if (ev.event_type === "message.created" && ev.payload.role === "user") {
+      turn.userText = String(ev.payload.text ?? "");
+    }
+    if (ev.event_type === "tool.call.proposed") {
+      turn.toolCallIds.push(String(ev.payload.tool_call_id ?? ""));
+    }
+    if (ev.event_type === "context.snapshot.created") {
+      turn.snapshotSequences.push(ev.sequence);
+    }
+    if (ev.event_type === "turn.completed") turn.status = "completed";
+    if (ev.event_type === "turn.failed") turn.status = "failed";
+    if (ev.event_type === "session.waiting_approval") turn.status = "waiting_approval";
+    turn.entries.push(describe(ev));
+  }
+  const list = [...turns.values()].sort((a, b) => a.startSequence - b.startSequence);
+  // 无 turn_id 的事件（如 checkpoint.restored）附到最后一个 turn 之外展示
+  if (openTail.length > 0 && list.length > 0) {
+    list[list.length - 1].entries.push(
+      ...openTail.map((ev) => ({ ...describe(ev), type: `[Turn 外] ${describe(ev).type}` })),
+    );
+  }
+  return list;
 }
 
 function foldMessage(state: ConsoleState, ev: EventEnvelope): ConsoleState {
@@ -368,12 +427,14 @@ function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {
         toolCallId: id,
         tool: p.tool as string,
         arguments: p.arguments,
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.preflighted":
       return upsertToolCall(state, id, (prev) => ({
         ...prev,
         toolCallId: id,
         plan: p.plan as ToolPlan,
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "policy.decision_made":
       return upsertToolCall(state, id, (prev) => ({
@@ -386,18 +447,21 @@ function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {
           risk: String(p.risk ?? ""),
           reason: p.reason as string | undefined,
         },
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.approval_required":
       return upsertToolCall(state, id, (prev) => ({
         ...prev,
         toolCallId: id,
         approval: "required",
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.approved":
       return upsertToolCall(state, id, (prev) => ({
         ...prev,
         toolCallId: id,
         approval: "approved",
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.rejected":
       return upsertToolCall(state, id, (prev) => ({
@@ -406,6 +470,7 @@ function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {
         approval: p.response === "deny" ? "denied" : prev?.approval,
         status: "rejected",
         error: p.reason as string | undefined,
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.started":
       return upsertToolCall(state, id, (prev) => ({
@@ -413,6 +478,7 @@ function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {
         toolCallId: id,
         tool: (p.tool as string) ?? prev?.tool,
         status: "started",
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.output":
       return upsertToolCall(state, id, (prev) => ({
@@ -428,6 +494,7 @@ function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {
         resultText: p.text as string | undefined,
         durationMs: p.duration_ms as number | undefined,
         sideEffects: p.actual_side_effects as unknown[] | undefined,
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     case "tool.call.failed":
       return upsertToolCall(state, id, (prev) => ({
@@ -435,6 +502,7 @@ function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {
         toolCallId: id,
         status: "failed",
         error: p.error as string | undefined,
+        turnId: ev.turn_id ?? prev?.turnId,
       }));
     default:
       return state;

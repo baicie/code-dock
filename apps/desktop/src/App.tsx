@@ -16,14 +16,16 @@ import { foldEvent, foldEvents, initialState, type ConsoleState } from "./events
 import { ChangesPanel } from "./panels/ChangesPanel";
 import { ContextPanel } from "./panels/ContextPanel";
 import { ToolsPanel } from "./panels/ToolsPanel";
+import { TracePanel, type JumpTarget } from "./panels/TracePanel";
 
-type Tab = "chat" | "context" | "tools" | "changes";
+type Tab = "chat" | "context" | "tools" | "changes" | "trace";
 
 const TAB_ZH: Record<Tab, string> = {
   chat: "对话",
   context: "Context",
   tools: "Tools",
   changes: "Changes",
+  trace: "Trace",
 };
 
 export default function App() {
@@ -36,6 +38,13 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState<ConsoleState>(initialState());
+  const [focus, setFocus] = useState<JumpTarget>({ tab: "chat" });
+
+  /// 跨面板跳转（§14.2）：任何 Tool / Change / Context 可互相追踪
+  function jump(target: JumpTarget) {
+    setFocus(target);
+    setTab(target.tab);
+  }
   const subscribedSession = useRef<string | null>(null);
   const chatBottom = useRef<HTMLDivElement | null>(null);
 
@@ -175,6 +184,9 @@ export default function App() {
                 {t === "changes" && state.checkpoints.length > 0 && (
                   <span className="count">{state.checkpoints.length}</span>
                 )}
+                {t === "trace" && state.rawEvents.length > 0 && (
+                  <span className="count">{state.rawEvents.length}</span>
+                )}
               </button>
             ))}
           </div>
@@ -202,9 +214,30 @@ export default function App() {
                 </section>
               </>
             )}
-            {tab === "context" && <ContextPanel state={state} />}
-            {tab === "tools" && <ToolsPanel state={state} />}
-            {tab === "changes" && <ChangesPanel state={state} sessionId={sessionId} />}
+            {tab === "context" && (
+              <ContextPanel
+                state={state}
+                focusSnapshotSequence={focus.snapshotSequence}
+                onJumpToTools={(toolCallId) => jump({ tab: "tools", toolCallId })}
+              />
+            )}
+            {tab === "tools" && (
+              <ToolsPanel
+                state={state}
+                focusToolCallId={focus.toolCallId}
+                onJumpToContext={(snapshotSequence) =>
+                  jump({ tab: "context", snapshotSequence })
+                }
+              />
+            )}
+            {tab === "changes" && (
+              <ChangesPanel
+                state={state}
+                sessionId={sessionId}
+                onJumpToTools={(toolCallId) => jump({ tab: "tools", toolCallId })}
+              />
+            )}
+            {tab === "trace" && <TracePanel state={state} onJump={jump} />}
           </div>
         </main>
       </div>

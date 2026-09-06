@@ -6,12 +6,23 @@ import type { ConsoleState, PatchView } from "../events";
 import { derivePatchViews } from "../events";
 import { restoreCheckpoint } from "../api";
 
-function PatchCard({ patch }: { patch: PatchView }) {
+function PatchCard({
+  patch,
+  onJumpToTools,
+}: {
+  patch: PatchView;
+  onJumpToTools?: (toolCallId: string) => void;
+}) {
   return (
     <div className={`toolcall patch ${patch.conflicted ? "conflicted" : ""}`}>
       <div className="toolcall-head">
         <strong>file.patch</strong>
         <span className="patch-path">{patch.path}</span>
+        {onJumpToTools && (
+          <button className="link" onClick={() => onJumpToTools(patch.toolCallId)}>
+            工具详情
+          </button>
+        )}
         {patch.conflicted && <span className="badge status-failed">⚠ 冲突，未应用</span>}
         {patch.status === "completed" && <span className="badge status-completed">已应用</span>}
         {patch.status === "rejected" && <span className="badge status-rejected">已拒绝</span>}
@@ -39,9 +50,11 @@ function PatchCard({ patch }: { patch: PatchView }) {
 export function ChangesPanel({
   state,
   sessionId,
+  onJumpToTools,
 }: {
   state: ConsoleState;
   sessionId: string | null;
+  onJumpToTools?: (toolCallId: string) => void;
 }) {
   const patches = derivePatchViews(state);
   const hasAnything = state.checkpoints.length > 0 || patches.length > 0 || state.conflicts.length > 0;
@@ -103,7 +116,9 @@ export function ChangesPanel({
       {patches.length === 0 ? (
         <p className="muted">还没有补丁记录</p>
       ) : (
-        patches.map((p) => <PatchCard key={p.toolCallId} patch={p} />)
+        patches.map((p) => (
+          <PatchCard key={p.toolCallId} patch={p} onJumpToTools={onJumpToTools} />
+        ))
       )}
 
       {hasAnything && state.conflicts.length > 0 && (

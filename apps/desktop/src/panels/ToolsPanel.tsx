@@ -2,6 +2,7 @@
  * Tools 面板（§14.1）：Tool Proposal、Preflight、Policy 裁决、审批、
  * 输入/输出与实际副作用——工具调用全生命周期可追溯（§8.3.4）。
  */
+import { useEffect, useRef } from "react";
 import type { ConsoleState, ToolCallView } from "../events";
 
 const STATUS_ZH: Record<string, string> = {
@@ -51,9 +52,23 @@ function Lifecycle({ call }: { call: ToolCallView }) {
   );
 }
 
-function ToolCall({ call }: { call: ToolCallView }) {
+function ToolCall({
+  call,
+  focused,
+  snapshots,
+  onJumpToContext,
+}: {
+  call: ToolCallView;
+  focused: boolean;
+  snapshots: ConsoleState["snapshots"];
+  onJumpToContext?: (snapshotSequence: number) => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (focused) ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focused]);
   return (
-    <div className={`toolcall ${call.status ?? ""}`}>
+    <div ref={ref} className={`toolcall ${call.status ?? ""} ${focused ? "focused" : ""}`}>
       <div className="toolcall-head">
         <strong>{call.tool ?? "未知工具"}</strong>
         <span className="tcid">{call.toolCallId.slice(0, 8)}…</span>
@@ -137,18 +152,43 @@ function ToolCall({ call }: { call: ToolCallView }) {
           <span>{call.durationMs}ms</span>
         </div>
       )}
+      {onJumpToContext && call.turnId && (
+        <div className="trace-links">
+          {snapshots
+            .filter((s) => s.turnId === call.turnId)
+            .map((s) => (
+              <button key={s.sequence} className="link" onClick={() => onJumpToContext(s.sequence)}>
+                上下文快照 #{s.sequence}
+              </button>
+            ))}
+        </div>
+      )}
     </div>
   );
 }
 
-export function ToolsPanel({ state }: { state: ConsoleState }) {
+export function ToolsPanel({
+  state,
+  focusToolCallId,
+  onJumpToContext,
+}: {
+  state: ConsoleState;
+  focusToolCallId?: string;
+  onJumpToContext?: (snapshotSequence: number) => void;
+}) {
   if (state.toolCalls.length === 0) {
     return <p className="muted panel-empty">还没有工具调用（模型提出 Tool Proposal 后出现）</p>;
   }
   return (
     <div className="panel">
       {state.toolCalls.map((call) => (
-        <ToolCall key={call.toolCallId} call={call} />
+        <ToolCall
+          key={call.toolCallId}
+          call={call}
+          focused={focusToolCallId === call.toolCallId}
+          snapshots={state.snapshots}
+          onJumpToContext={onJumpToContext}
+        />
       ))}
     </div>
   );

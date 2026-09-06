@@ -75,7 +75,8 @@
   - [x] Context 面板：预算条 + 条目表（选择原因/信任/变换）+ 排除项 + 载荷哈希（§8.4.9 可解释性）
   - [x] Tools 面板：工具全生命周期链（提议→预检→策略→审批→执行）+ 权限/输入/输出/实际副作用（§8.3.4）
   - [x] Changes 面板：Patch 伪 diff（find/replace + 前后哈希）、Checkpoint 列表与**一键回滚按钮**（§24）、冲突记录（§18.2）
-  - [ ] Network / Trace / Security / Memory / Plugins 面板（§14），Monaco diff + xterm.js
+  - [x] Trace 面板：按 turn 分组的完整因果链（用户消息→快照→模型调用→工具→变更）+ **跨面板跳转**（§14.2 退出标准"任何 Tool、Change、Context 可互相追踪"达成）
+  - [ ] Network / Security / Memory / Plugins 面板（§14），Monaco diff + xterm.js
   - [ ] CI 增加 desktop job（ubuntu 需 webkit2gtk 系统依赖）
   - [ ] 图标/打包/签名（bundle.active 当前关闭）
 - [ ] **阶段 5** Plugin System v1：Wasmtime + WIT、`.cdplugin`、Rust/TS SDK、Native Sidecar Supervisor（§10）。

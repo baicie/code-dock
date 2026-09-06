@@ -485,3 +485,58 @@ button.restore {
 .patch.conflicted {
   border-color: #6b4a2a;
 }
+
+
+/* ---------- Trace 面板与跨面板跳转 ---------- */
+.trace-turn {
+  background: #1c1f25;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.trace-turn.status-failed {
+  border-color: #6b2a2a;
+}
+
+.trace-turn.status-waiting_approval {
+  border-color: #6b4a2a;
+}
+
+.trace-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.trace-entries {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  max-height: 220px;
+  overflow-y: auto;
+  border-left: 2px solid #2a2e35;
+  padding-left: 10px;
+}
+
+.trace-links {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+button.link {
+  background: #23262c;
+  color: #7eb8e0;
+  font-size: 11px;
+  padding: 3px 10px;
+}
+
+.toolcall.focused {
+  border-color: #2f6fed;
+  box-shadow: 0 0 0 1px #2f6fed;
+}

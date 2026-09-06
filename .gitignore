@@ -1,5 +1,6 @@
 # Rust
 /target
+apps/desktop/src-tauri/target/
 **/*.rs.bk
 Cargo.lock.bak
 
@@ -9,7 +10,6 @@ dist/
 .pnpm-store/
 
 # Tauri
-apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
 
 # 本地数据

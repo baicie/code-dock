@@ -19,6 +19,10 @@ members = [
     "apps/cli",
 ]
 
+# Desktop（Tauri）独立 workspace：需要 webkit2gtk 等系统依赖，
+# 主 CI 不构建；见 apps/desktop/README。
+exclude = ["apps/desktop/src-tauri"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

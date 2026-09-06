@@ -73,6 +73,24 @@ async fn send_message(
 }
 
 #[tauri::command]
+async fn restore_checkpoint(
+    state: State<'_, AppState>,
+    session_id: String,
+    checkpoint_id: String,
+) -> Result<serde_json::Value, String> {
+    DaemonClient::new(state.socket())
+        .call(
+            "checkpoint.restore",
+            json!({
+                "session_id": session_id,
+                "checkpoint_id": checkpoint_id,
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn list_events(
     state: State<'_, AppState>,
     session_id: String,
@@ -141,6 +159,7 @@ pub fn run() {
             create_session,
             send_message,
             list_events,
+            restore_checkpoint,
             subscribe_session,
         ])
         .run(tauri::generate_context!())

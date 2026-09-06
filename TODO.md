@@ -74,7 +74,8 @@
   - [x] Console 面板最小版：会话创建（四模式）、流式对话（`message.delta` 实时渲染）、事件时间线（策略裁决/审批/冲突/Checkpoint 可解释事件）
   - [x] Context 面板：预算条 + 条目表（选择原因/信任/变换）+ 排除项 + 载荷哈希（§8.4.9 可解释性）
   - [x] Tools 面板：工具全生命周期链（提议→预检→策略→审批→执行）+ 权限/输入/输出/实际副作用（§8.3.4）
-  - [ ] Network / Changes / Trace / Security / Memory / Plugins 面板（§14），Monaco + xterm.js
+  - [x] Changes 面板：Patch 伪 diff（find/replace + 前后哈希）、Checkpoint 列表与**一键回滚按钮**（§24）、冲突记录（§18.2）
+  - [ ] Network / Trace / Security / Memory / Plugins 面板（§14），Monaco diff + xterm.js
   - [ ] CI 增加 desktop job（ubuntu 需 webkit2gtk 系统依赖）
   - [ ] 图标/打包/签名（bundle.active 当前关闭）
 - [ ] **阶段 5** Plugin System v1：Wasmtime + WIT、`.cdplugin`、Rust/TS SDK、Native Sidecar Supervisor（§10）。

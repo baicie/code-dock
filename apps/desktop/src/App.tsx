@@ -13,15 +13,17 @@ import {
   type EventEnvelope,
 } from "./api";
 import { foldEvent, foldEvents, initialState, type ConsoleState } from "./events";
+import { ChangesPanel } from "./panels/ChangesPanel";
 import { ContextPanel } from "./panels/ContextPanel";
 import { ToolsPanel } from "./panels/ToolsPanel";
 
-type Tab = "chat" | "context" | "tools";
+type Tab = "chat" | "context" | "tools" | "changes";
 
 const TAB_ZH: Record<Tab, string> = {
   chat: "对话",
   context: "Context",
   tools: "Tools",
+  changes: "Changes",
 };
 
 export default function App() {
@@ -170,6 +172,9 @@ export default function App() {
                 {t === "context" && state.snapshots.length > 0 && (
                   <span className="count">{state.snapshots.length}</span>
                 )}
+                {t === "changes" && state.checkpoints.length > 0 && (
+                  <span className="count">{state.checkpoints.length}</span>
+                )}
               </button>
             ))}
           </div>
@@ -199,6 +204,7 @@ export default function App() {
             )}
             {tab === "context" && <ContextPanel state={state} />}
             {tab === "tools" && <ToolsPanel state={state} />}
+            {tab === "changes" && <ChangesPanel state={state} sessionId={sessionId} />}
           </div>
         </main>
       </div>

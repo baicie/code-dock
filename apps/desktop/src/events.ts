@@ -84,17 +84,57 @@ export interface ToolCallView {
   error?: string;
 }
 
+export interface CheckpointFile {
+  path: string;
+  sha256: string;
+}
+
+export interface CheckpointView {
+  checkpointId: string;
+  sequence: number;
+  occurredAt: string;
+  tool: string;
+  files: CheckpointFile[];
+  restored: boolean;
+  restoredFiles?: string[];
+}
+
+export interface ChangeConflict {
+  toolCallId: string;
+  resource: string;
+  sequence: number;
+}
+
+export interface PatchView {
+  toolCallId: string;
+  path: string;
+  patches: { find: string; replace: string }[];
+  shaBefore?: string;
+  shaAfter?: string;
+  conflicted: boolean;
+  status?: string;
+}
+
 export interface ConsoleState {
   messages: ChatMessage[];
   timeline: TimelineEntry[];
   snapshots: SnapshotView[];
   toolCalls: ToolCallView[];
+  checkpoints: CheckpointView[];
+  conflicts: ChangeConflict[];
 }
 
 // ---------- 折叠 ----------
 
 export function initialState(): ConsoleState {
-  return { messages: [], timeline: [], snapshots: [], toolCalls: [] };
+  return {
+    messages: [],
+    timeline: [],
+    snapshots: [],
+    toolCalls: [],
+    checkpoints: [],
+    conflicts: [],
+  };
 }
 
 export function foldEvents(state: ConsoleState, events: EventEnvelope[]): ConsoleState {
@@ -114,6 +154,7 @@ export function foldEvent(state: ConsoleState, ev: EventEnvelope): ConsoleState 
   next = foldMessage(next, ev);
   next = foldSnapshot(next, ev);
   next = foldToolCall(next, ev);
+  next = foldChanges(next, ev);
   return next;
 }
 
@@ -248,6 +289,71 @@ function upsertToolCall(
     ...state,
     toolCalls: state.toolCalls.map((t) => (t.toolCallId === toolCallId ? next : t)),
   };
+}
+
+function foldChanges(state: ConsoleState, ev: EventEnvelope): ConsoleState {
+  const p = ev.payload as Record<string, unknown>;
+  if (ev.event_type === "checkpoint.created") {
+    const view: CheckpointView = {
+      checkpointId: String(p.checkpoint_id ?? ""),
+      sequence: ev.sequence,
+      occurredAt: ev.occurred_at,
+      tool: String(p.tool ?? ""),
+      files: (p.files as CheckpointFile[] | undefined)?.map((f) => ({
+        path: f.path,
+        sha256: f.sha256,
+      })) ?? [],
+      restored: false,
+    };
+    return { ...state, checkpoints: [...state.checkpoints, view] };
+  }
+  if (ev.event_type === "checkpoint.restored") {
+    const checkpointId = String(p.checkpoint_id ?? "");
+    const restoredFiles = (p.files as string[] | undefined) ?? [];
+    return {
+      ...state,
+      checkpoints: state.checkpoints.map((c) =>
+        c.checkpointId === checkpointId
+          ? { ...c, restored: true, restoredFiles }
+          : c,
+      ),
+    };
+  }
+  if (ev.event_type === "change.conflicted") {
+    return {
+      ...state,
+      conflicts: [
+        ...state.conflicts,
+        {
+          toolCallId: String(p.tool_call_id ?? ""),
+          resource: String(p.resource ?? ""),
+          sequence: ev.sequence,
+        },
+      ],
+    };
+  }
+  return state;
+}
+
+/** file.patch 的工具调用 → 补丁伪 diff 视图（含冲突与前后哈希）。 */
+export function derivePatchViews(state: ConsoleState): PatchView[] {
+  return state.toolCalls
+    .filter((t) => t.tool === "file.patch" && t.arguments !== undefined)
+    .map((t) => {
+      const args = t.arguments as { path?: string; patches?: { find: string; replace: string }[] };
+      const modified = (t.sideEffects ?? []).find(
+        (s) => (s as { kind?: string }).kind === "file.modified",
+      ) as { details?: { sha256_before?: string; sha256_after?: string } } | undefined;
+      return {
+        toolCallId: t.toolCallId,
+        path: args.path ?? "",
+        patches: args.patches ?? [],
+        shaBefore: modified?.details?.sha256_before,
+        shaAfter: modified?.details?.sha256_after,
+        conflicted: state.conflicts.some((c) => c.toolCallId === t.toolCallId),
+        status: t.status,
+      };
+    });
 }
 
 function foldToolCall(state: ConsoleState, ev: EventEnvelope): ConsoleState {

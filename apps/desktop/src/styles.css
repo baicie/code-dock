@@ -417,3 +417,71 @@ h5 {
   font-size: 11px;
   color: #a8b2bd;
 }
+
+/* ---------- Changes 面板 ---------- */
+.checkpoint {
+  background: #1c1f25;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.checkpoint.restored {
+  opacity: 0.65;
+}
+
+.checkpoint-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.mono,
+.patch-path {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.checkpoint-files .file {
+  background: #14161a;
+  border: 1px solid #2a2e35;
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+
+button.restore {
+  margin-left: auto;
+  background: #a34a2f;
+}
+
+.diff {
+  background: #14161a;
+  border: 1px solid #2a2e35;
+  border-radius: 4px;
+  padding: 6px 0;
+  margin-bottom: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.diff-row {
+  padding: 1px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-row.del {
+  color: #e08a7e;
+  background: rgba(224, 138, 126, 0.08);
+}
+
+.diff-row.add {
+  color: #7ec8a9;
+  background: rgba(126, 200, 169, 0.08);
+}
+
+.patch.conflicted {
+  border-color: #6b4a2a;
+}

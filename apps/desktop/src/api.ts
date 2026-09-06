@@ -50,6 +50,13 @@ export function listEvents(sessionId: string): Promise<{ events: EventEnvelope[]
   return invoke("list_events", { sessionId });
 }
 
+export function restoreCheckpoint(
+  sessionId: string,
+  checkpointId: string,
+): Promise<{ restored: boolean; files: string[] }> {
+  return invoke("restore_checkpoint", { sessionId, checkpointId });
+}
+
 export function subscribeSession(sessionId: string, afterSequence = 0): Promise<void> {
   return invoke("subscribe_session", { sessionId, afterSequence });
 }

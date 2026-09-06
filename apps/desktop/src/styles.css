@@ -173,3 +173,247 @@ h4 {
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+
+/* ---------- Tabs 与面板 ---------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px;
+  background: #191c21;
+  border-bottom: 1px solid #2a2e35;
+}
+
+.tab {
+  background: transparent;
+  color: #8b929c;
+  padding: 4px 12px;
+}
+
+.tab.active {
+  background: #2a2e35;
+  color: #d8dce2;
+}
+
+.tab .count {
+  margin-left: 6px;
+  background: #2f6fed;
+  border-radius: 8px;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.panel-area {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.panel-empty {
+  padding: 24px;
+  text-align: center;
+}
+
+.muted {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.snapshot-meta {
+  margin-bottom: 8px;
+  color: #8b929c;
+}
+
+.hash {
+  color: #5b8fd9;
+  font-family: ui-monospace, monospace;
+}
+
+.budget {
+  margin-bottom: 12px;
+}
+
+.budget-bar {
+  height: 6px;
+  background: #2a2e35;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.budget-used {
+  height: 100%;
+  background: #2f9e63;
+}
+
+.budget-text {
+  display: block;
+  margin-top: 4px;
+  color: #8b929c;
+  font-size: 11px;
+}
+
+.items {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.items th,
+.items td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid #23262c;
+}
+
+.items th {
+  color: #8b929c;
+  font-weight: 500;
+}
+
+td.warn,
+span.warn {
+  color: #e0a34a;
+}
+
+.excluded {
+  list-style: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.excluded strong {
+  color: #d8dce2;
+}
+
+h5 {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: #8b929c;
+}
+
+.snapshot-picker {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.snapshot-picker select {
+  background: #14161a;
+  border: 1px solid #2a2e35;
+  color: inherit;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+/* ---------- 工具生命周期 ---------- */
+.toolcall {
+  background: #1c1f25;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.toolcall-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.tcid {
+  color: #6b7280;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.badge {
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.status-completed {
+  background: #1f4d35;
+  color: #7ec8a9;
+}
+
+.status-failed,
+.status-rejected {
+  background: #4d241f;
+  color: #e08a7e;
+}
+
+.status-started {
+  background: #1f3a4d;
+  color: #7eb8e0;
+}
+
+.lifecycle {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.step {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #2a2e35;
+  color: #6b7280;
+}
+
+.step.done {
+  color: #d8dce2;
+  border-color: #3d434d;
+}
+
+.step.tone-allow,
+.step.tone-approved,
+.step.tone-completed {
+  background: #1f4d35;
+}
+
+.step.tone-deny,
+.step.tone-denied,
+.step.tone-failed,
+.step.tone-rejected {
+  background: #4d241f;
+}
+
+.step.tone-require_approval,
+.step.tone-required {
+  background: #4d3d1f;
+}
+
+.kv {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  align-items: baseline;
+}
+
+.kv .k {
+  flex-shrink: 0;
+  width: 70px;
+  color: #8b929c;
+}
+
+.kv pre.args {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #a8b2bd;
+}

@@ -69,7 +69,12 @@
   - [ ] Git/Diagnostics 检索来源作为 Retriever（§12.1 #5/#6）
   - [x] Trust/Role 溯源（§18.1 + §8.3.7 完整语义）：副作用工具按上下文溯源——干净上下文按 §8.3.7 默认策略（Edit/Auto 自动放行 Medium），上下文含 Data 条目时提升一级审批；Ask/Plan 一律拒绝副作用操作
   - [ ] Visual Replay 事件回放视图（阶段 4 UI 的前置）
-- [ ] **阶段 4** Desktop DevTools Alpha：Tauri 2 + React，Console/Context/Tools/Network/Changes/Trace/Security 面板（§14），Monaco + xterm.js。
+- [ ] **阶段 4** Desktop DevTools Alpha（2026-09-05 第一切口已落地）：
+  - [x] Tauri 2 + React 骨架：`apps/desktop`（独立 Cargo workspace + pnpm），桥接层复用 CLI 同款 UDS/JSON-RPC 协议（§5：Desktop 不内嵌 Runtime）
+  - [x] Console 面板最小版：会话创建（四模式）、流式对话（`message.delta` 实时渲染）、事件时间线（策略裁决/审批/冲突/Checkpoint 可解释事件）
+  - [ ] Context / Tools / Network / Changes / Trace / Security 面板（§14），Monaco + xterm.js
+  - [ ] CI 增加 desktop job（ubuntu 需 webkit2gtk 系统依赖）
+  - [ ] 图标/打包/签名（bundle.active 当前关闭）
 - [ ] **阶段 5** Plugin System v1：Wasmtime + WIT、`.cdplugin`、Rust/TS SDK、Native Sidecar Supervisor（§10）。
 - [ ] **阶段 6** Mobile Remote：PWA、QR 配对、E2EE Relay、远程审批（§16）。
 - [ ] **阶段 7** Browser Extension：MV3 + Native Messaging、用户触发的上下文采集（§15）。
